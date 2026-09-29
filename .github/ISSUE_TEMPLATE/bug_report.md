@@ -31,13 +31,13 @@ If applicable, add screenshots to help explain your problem.
  - Device: [e.g. iPhone 6]
  - OS: [e.g. iOS 8.1, Android 15]
 
-**Game Version:** 0.0.7
+**GS6 Version:**
 
 **Checklist:**
 - [ ] I have searched existing issues to ensure this is not a duplicate.
 - [ ] I am using the latest release.
 - [ ] I checked all of these without reading them (don't check this!).
-- [ ] I downloaded all my assets and didn't modify them.
+- [ ] I downloaded all required assets and didn't modify them.
 
 **Additional context**
 
