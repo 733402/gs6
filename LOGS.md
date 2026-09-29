@@ -10,7 +10,7 @@ Unsure how to do something? Google it.
 4. Install ADB (https://developer.android.com/tools/releases/platform-tools) on your PC and unzip it
 5. Navigate to the platform-tools folder and open CMD
 6. Close the game on your phone
-7. Run `adb logcat -s "OfflineSekaiR"`
+7. Run `adb logcat -s "UTSK Mod Framework"`
 8. Launch the game on your phone. Navigate to where the issue is occuring in game
 9. Copy the logs printed!
 
@@ -20,6 +20,6 @@ Unsure how to do something? Google it.
 3. Install libimobiledevice (windows: https://github.com/jrjr/libimobiledevice-windows, there are other versions you can find on Google) and unzip it
 4. Navigate to the suite path and open POWERSHELL
 5. Close the game on your phone
-6. Run `./idevicesyslog | Select-String -Pattern "OfflineSekaiR"` (use grep for Mac/Linux: `idevicesyslog | grep "OfflineSekaiR"`)
+6. Run `./idevicesyslog | Select-String -Pattern "UTSK Mod Framework"` (use grep for Mac/Linux: `idevicesyslog | grep "UTSK Mod Framework"`)
 7. Launch the game on your phone. Navigate to where the issue is occuring in game
 8. Copy the logs printed!
