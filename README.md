@@ -11,7 +11,7 @@ This project will receive infrequent updates.
 # GridlessSekai 6
 ![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/UnknownSekai/GridlessSekai6/total) ![GitHub Repo stars](https://img.shields.io/github/stars/UnknownSekai/GridlessSekai6)
 
-A fully **offline** archive of a certain popular mobile rhythm game (JP, v6.5.0 - released 2026). Yes, you can play it without internet!
+A fully **offline** archive of a certain popular mobile rhythm game (JP, v6.8.1 - released 2026). Yes, you can play it without internet!
 
 This project is a culmination of ALL my knowledge. If you enjoy it, please **⭐ Star** the repo.
 
