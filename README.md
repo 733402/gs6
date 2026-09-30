@@ -28,9 +28,17 @@ This app is a **sandbox** for not just in-game content, but also some mods.
 
 ## Assets
 
-You need at least **10GB+ free** on your device. The more content you download, the more storage you will need.
+You need at least **12GB+ free** on your device. The more content you download, the more storage you will need.
 
 Base assets don't change between releases.
+
+### Portioned Files
+A full install of ALL assets for this game is approximately *80 GB*. To mitigate this, we split the assets into portions you download based on what feature you want to play.
+- Base (REQUIRED) ()
+- Gacha ()
+- Stories ()
+- Virtual Lives (not playable - for complete asset archival purposes only) ()
+- MySEKAI (not playable - for complete asset archival purposes only) ()
 
 *GS6 IS UNDER DEVELOPMENT. COME BACK IN THE FUTURE.*
 
