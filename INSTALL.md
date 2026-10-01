@@ -3,9 +3,8 @@
 > **DO NOT EXTRACT the zip.**
 
 # UNOFFICIAL FAN-MADE GUIDE CAN BE FOUND HERE: https://gridlesssekai.patchednexus.win/
-# 中文安装说明 (iOS): https://docs.qq.com/doc/DTVpDV2V4eEpYbE50
 > [!IMPORTANT]
-> We do NOT provide help or support for installing GridlessSekai Retro beyond these instructions. Do not open any Issues to ask for help, unless it is a bug.
+> We do NOT provide help or support for installing GridlessSekai 6 beyond these instructions. Do not open any Issues to ask for help, unless it is a bug.
 
 ## Android
 
@@ -24,10 +23,11 @@ NOTE: experienced users, you just need to move the `assets_android.zip` to `/sdc
 
 **Option A: ADB (PC required)**
 
-Download `assets_android.zip` to your PC, then run:
+Download `base_android.zip` to your PC, then run:
 ```
-adb push assets_android.zip /sdcard/Android/data/com.utsk.gridlesssekai6/files/assets_android.zip
+adb push base_android.zip /sdcard/Android/data/com.utsk.gridlesssekai6/files/base_android.zip
 ```
+(replace `base_android.zip` in the last command with whatever file you're installing).
 
 **Option B: Shizuku (no PC, no root)**
 1. Download the assets on your device (at least `base_android.zip`)
@@ -43,14 +43,15 @@ adb push assets_android.zip /sdcard/Android/data/com.utsk.gridlesssekai6/files/a
    pkg install android-tools
    adb pair localhost:<port>   # use pairing code from Settings
    adb connect localhost:<port>
-   adb shell run-as com.utsk.gridlesssekai6 cp /sdcard/Download/assets_android.zip ./files/assets_android.zip
+   adb shell run-as com.utsk.gridlesssekai6 cp /sdcard/Download/base_android.zip ./files/base_android.zip
    ```
+   (replace `base_android.zip` in the last command with whatever file you're installing).
 
 > [!IMPORTANT]
 > **DO NOT EXTRACT the zips.**
 
 #### 3. Play
-Open the app. The game will "download" assets locally (~12GB), so make sure you have 24GB+ free.
+Open the app. The game will "download" assets locally (~13GB), so make sure you have 13GB+ free.
 
 ---
 
@@ -74,4 +75,4 @@ Example YouTube searches: `sideload ios no pc`, `sideload ios impactor` (require
 > **DO NOT EXTRACT the zips.**
 
 #### 3. Play
-Open the app. The game will "download" assets locally (~12GB), so make sure you have 24GB+ free.
+Open the app. The game will "download" assets locally (~13GB), so make sure you have 13GB+ free.
