@@ -33,13 +33,15 @@ You need at least **12GB+ free** on your device. The more content you download, 
 Base assets don't change between releases.
 
 ### Portioned Files
-A full install of ALL assets for this game is approximately *80 GB*. To mitigate this, we split the assets into portions you download based on what feature you want to play.
-- Base (REQUIRED) (~12.0gb)
-- Music Videos (~36.7gb)
-- Gacha (~6.3gb)
-- Stories (~15.6gb)
-- Virtual Lives (not playable - for complete asset archival purposes only) (~12.0gb)
-- MySEKAI (not playable - for complete asset archival purposes only) (~1.2gb)
+A full install of ALL assets for this game is approximately *90 GB*. To mitigate this, we split the assets into portions you download based on what feature you want to play.
+- Base (REQUIRED)
+- Music Videos
+- Gacha
+- Stories
+- Virtual Lives (not playable - for complete asset archival purposes only)
+- MySEKAI (not playable - for complete asset archival purposes only)
+
+For file sizes and hashes, please refer to [HASHES.md](HASHES.md).
 
 *GS6 IS UNDER DEVELOPMENT. COME BACK IN THE FUTURE.*
 
