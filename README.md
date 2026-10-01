@@ -28,20 +28,14 @@ This app is a **sandbox** for not just in-game content, but also some mods.
 
 ## Assets
 
-You need at least **14GB+ free** on your device. The more content you download, the more storage you will need.
+You need at least **30GB+ free** on your device. The more content you download, the more storage you will need.
 
-You need **~68GB free** for FULL functionality of this app (music videos, gachas, and stories).
+You need **~68GB free** for FULL functionality of this app.
 
 Base assets don't change between releases.
 
 ### Portioned Files
 A full install of ALL assets for this game is approximately *90 GB*. To mitigate this, we split the assets into portions you download based on what feature you want to play.
-- Base (REQUIRED)
-- Music Videos
-- Gacha
-- Stories
-- Virtual Lives (not playable - for complete asset archival purposes only)
-- MySEKAI (not playable - for complete asset archival purposes only)
 
 For file sizes and hashes, please refer to [HASHES.md](HASHES.md).
 
