@@ -36,8 +36,8 @@ Base assets don't change between releases.
 A full install of ALL assets for this game is approximately *80 GB*. To mitigate this, we split the assets into portions you download based on what feature you want to play.
 - Base (REQUIRED) (~12.0gb)
 - Music Videos (~36.6gb)
-- Gacha (6.3gb)
-- Stories (15.6gb)
+- Gacha (~6.3gb)
+- Stories (~15.6gb)
 - Virtual Lives (not playable - for complete asset archival purposes only) (~12.0gb)
 - MySEKAI (not playable - for complete asset archival purposes only) (~1.2gb)
 
