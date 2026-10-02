@@ -28,9 +28,9 @@ This app is a **sandbox** for not just in-game content, but also some mods.
 
 ## Assets
 
-You need at least **30GB+ free** on your device. The more content you download, the more storage you will need.
+You need at least **23GB+ free** on your device. The more content you download, the more storage you will need.
 
-You need **~68GB free** for FULL functionality of this app.
+You need **~69GB free** for FULL functionality of this app.
 
 Base assets don't change between releases.
 
