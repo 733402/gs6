@@ -51,7 +51,7 @@ adb push base_android.zip /sdcard/Android/data/com.utsk.gridlesssekai6/files/bas
 > **DO NOT EXTRACT the zips.**
 
 #### 3. Play
-Open the app. The game will "download" assets locally (~13GB), so make sure you have 13GB+ free.
+Open the app. The game will "download" assets locally (~23GB), so make sure you have 23GB+ free.
 
 ---
 
@@ -75,4 +75,4 @@ Example YouTube searches: `sideload ios no pc`, `sideload ios impactor` (require
 > **DO NOT EXTRACT the zips.**
 
 #### 3. Play
-Open the app. The game will "download" assets locally (~13GB), so make sure you have 13GB+ free.
+Open the app. The game will "download" assets locally (~23GB), so make sure you have 23GB+ free.
