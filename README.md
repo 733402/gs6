@@ -39,7 +39,9 @@ A full install of ALL assets for this game is approximately *90 GB*. To mitigate
 
 For file sizes and hashes, please refer to [HASHES.md](HASHES.md).
 
-*GS6 IS UNDER DEVELOPMENT. COME BACK IN THE FUTURE.*
+- **[Download assets from archive.org](https://archive.org/details/pjsk_6.8.1_assets)**
+
+Any mirrors are appreciated, please open an issue to have them added (must include ALL iOS and Android assets)
 
 # Installing
 Refer to [INSTALL.md](INSTALL.md)
