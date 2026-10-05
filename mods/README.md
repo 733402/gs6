@@ -13,3 +13,8 @@ Adds the Touch Indicators setting. Default off, change in Live settings (applies
 Adds the AUTO JUDGE setting. Default on (default game behaviour), change in Live settings. If off, turns off the AUTO judgement and instead makes auto play with PERFECT and have combo. (The Auto Live tag will still display.)
 
 Do not use this mod to trick or mislead people into believing it is real gameplay.
+
+### Custom Charts
+Custom charts allow users to play custom charts in the game, offline.
+
+For more information, please see [CUSTOM CHARTS](CUSTOM_CHARTS/README.md)
