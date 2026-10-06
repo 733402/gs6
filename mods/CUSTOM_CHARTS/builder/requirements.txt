@@ -1,6 +1,6 @@
 # ffmpeg and ffprobe must be on PATH (system dependency, not pip).
 
 Pillow
-sonolus-level-converters @ git+https://github.com/UntitledCharts/sonolus-level-converters
+git+https://github.com/UntitledCharts/sonolus-level-converters
 UnityPy
 cricodecs>=1.2.0
