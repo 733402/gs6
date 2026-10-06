@@ -1,9 +1,10 @@
 ### ⚠️ Post content online at your own risk - SEGA has banned unofficial apps on social media of any type for unofficial versions of the game.
-**⚠️ This project is _not RetroSEKAI or OurStage_.**
-RetroSEKAI and OurStage are both shut down.
-***This project is provided for educational and archival purposes only, and is not affiliated with SEGA, Crypton, or Colorful Palette.***
+**⚠️ This project is _not RetroSEKAI or OurStage_, as they are both shut down.**
+***This project is provided for educational purposes only, and is not affiliated with SEGA, Crypton, or Colorful Palette.***
 
-This project will receive infrequent updates.
+This project may receive infrequent updates.
+
+### Read up on the [mods](mods/README.md)
 
 > [!IMPORTANT]
 > We do NOT provide help or support for installing GridlessSekai 6 beyond these instructions. Do not open any Issues to ask for help, unless it is a bug.

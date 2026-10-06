@@ -8,3 +8,10 @@ In GridlessSekai 6, we have a mod that allows users to create and play custom ch
 ### How to use
 You can take a look at this screenshot:
 ![Screenshot of game in emulator in the Custom tab and Import button](how_to_play.png)
+
+### How to make your own custom charts
+Please use the Python builder program (found in builder/).
+
+This program **requires** ffmpeg installed in your system path.
+
+You will not receive support to use this. Please be somewhat knowledgeable in Python to run the program (`python main.py`). You many need Git in path (`git-scm.com`) to install one of the requirements.
