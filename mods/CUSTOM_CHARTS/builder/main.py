@@ -1,16 +1,41 @@
+#!/usr/bin/env python3
+"""GridlessSekai6 Custom Chart Builder - terminal edition (no GUI / tkinter).
+
+Easiest (no prompts): hand it a chart zip and it does everything
+    python main.py mychart.zip           validates + compiles .android/.ios .chart.gs6
+    python main.py a.zip b.zip           several at once (output lands next to each zip)
+    python main.py UnCh-xxxx.zip         UntitledCharts exports work too (level.json +
+                                         NSLevelData.json.gz + music/preview/jacket):
+                                         they are converted automatically. A zip holding
+                                         several exports (one folder per difficulty) is
+                                         merged into ONE multi-difficulty chart.
+    python main.py x.zip --set composer="Name" --set offset_ms=300   override fields
+
+Interactive:
+    python main.py                       step-by-step wizard, then a menu
+    python main.py --import chart.zip    load a previously built zip, then menu
+    python main.py --config chart.json   load a saved config, then menu
+
+Non-interactive (scriptable, good for SSH / headless boxes):
+    python main.py --config chart.json --zip out.zip
+    python main.py --config chart.json --compile out_base
+    python main.py --template > chart.json     print a config template
+
+Relative paths inside a config file are resolved relative to that file.
+"""
 from __future__ import annotations
 
+import argparse
+import atexit
 import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
-import tkinter as tk
 import uuid
 import zipfile
-from dataclasses import dataclass
-from tkinter import filedialog, messagebox, ttk
 
 DIFFICULTIES = ["easy", "normal", "hard", "expert", "master", "append"]
 MV_TYPES = ["ogmv", "2dmv"]
@@ -20,7 +45,12 @@ MAX_CHARTS = 6
 MAX_PREVIEW_SECONDS = 45.0
 FORMAT_VERSION = 1
 
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tga", ".tif", ".tiff"}
+AUDIO_EXTS = ".wav .mp3 .flac .ogg .m4a .aac .opus"
+
+
+# --------------------------------------------------------------------------- #
+# Media / validation helpers (unchanged logic from the GUI version)
+# --------------------------------------------------------------------------- #
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess:
@@ -133,969 +163,1148 @@ def ext_of(path: str) -> str:
     return os.path.splitext(path)[1].lower()
 
 
-@dataclass
-class ChartRow:
-    difficulty: tk.StringVar
-    level: tk.StringVar
-    path: tk.StringVar
-    combo: tk.StringVar
+def safe_name(s: str) -> str:
+    return re.sub(r"[^\w\-. ]+", "_", s).strip() or "custom_chart"
 
 
-@dataclass
-class MVRow:
-    kind: tk.StringVar
-    path: tk.StringVar
+# --------------------------------------------------------------------------- #
+# Config (plain dict) handling
+# --------------------------------------------------------------------------- #
 
 
-@dataclass
-class AltVocal:
-    name: tk.StringVar
-    vocals: tk.StringVar
-    vocal_type: tk.StringVar
-    audio: tk.StringVar
-    preview: tk.StringVar
-    jacket: tk.StringVar
+def new_cfg() -> dict:
+    return {
+        "jacket": "",
+        "track": "",
+        "track_pre": "",
+        "mvs": [],  # [{"kind": "ogmv"|"2dmv", "path": "..."}]
+        "charts": [],  # [{"difficulty": "expert", "level": 28, "path": "x.sus"}]
+        "title": "",
+        "charter": "",
+        "lyricist": "",
+        "composer": "",
+        "arranger": "",
+        "artist": "",
+        "vocals": "",
+        "collab": "",
+        "is_full": True,
+        "offset_ms": 0,
+        "mv_offset_ms": 0,
+        "original": "",
+        "default_vocal": {"name": "", "type": "sekai"},
+        "alt_vocals": [],  # [{"name","vocals","type","audio","preview","jacket"}]
+        "identifier": gen_double_uuid(),
+    }
 
 
-class App(tk.Tk):
-    def __init__(self):
-        super().__init__()
-        self.title("GridlessSekai6 Custom Chart Builder")
-        self.geometry("880x720")
-        self.minsize(760, 600)
+def template_cfg() -> dict:
+    c = new_cfg()
+    c.update(
+        {
+            "jacket": "jacket.png",
+            "track": "track.wav",
+            "track_pre": "track_pre.wav",
+            "mvs": [{"kind": "ogmv", "path": "mv.mp4"}],
+            "charts": [{"difficulty": "expert", "level": 28, "path": "expert.sus"}],
+            "title": "My Song",
+            "charter": "Me",
+            "lyricist": "Lyricist",
+            "composer": "Composer",
+            "arranger": "Arranger",
+            "artist": "Artist",
+            "vocals": "Vocals",
+        }
+    )
+    return c
 
-        self.chart_rows: list[ChartRow] = []
-        self.mv_rows: list[MVRow] = []
-        self.alt_vocals: list[AltVocal] = []
-        self._import_tmp: str | None = None
 
-        nb = ttk.Notebook(self)
-        nb.pack(fill="both", expand=True, padx=8, pady=(8, 0))
-        self._build_files_tab(nb)
-        self._build_charts_tab(nb)
-        self._build_metadata_tab(nb)
-        self._build_vocals_tab(nb)
-        self._build_identifier_tab(nb)
+PATH_KEYS = ("jacket", "track", "track_pre")
 
-        bar = ttk.Frame(self)
-        bar.pack(fill="x", padx=8, pady=8)
-        self.status = tk.StringVar(
-            value="Ready."
-            if ffprobe_available()
-            else "WARNING: ffprobe not found on PATH. Audio/preview checks disabled."
-        )
-        ttk.Label(bar, textvariable=self.status, anchor="w").pack(
-            side="left", fill="x", expand=True
-        )
-        ttk.Button(bar, text="Build .zip…", command=self.build).pack(side="right")
-        ttk.Button(bar, text="Compile .chart.gs6…", command=self.compile_gs6).pack(
-            side="right", padx=6
-        )
-        ttk.Button(bar, text="Import .zip…", command=self.import_zip).pack(side="right")
 
-        self._add_chart_row()
+def load_config(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+    if not isinstance(raw, dict):
+        raise ValueError("config must be a JSON object")
+    cfg = new_cfg()
+    for k, v in raw.items():
+        if k in cfg:
+            cfg[k] = v
+    base = os.path.dirname(os.path.abspath(path))
 
-    def _build_files_tab(self, nb):
-        tab = ttk.Frame(nb)
-        nb.add(tab, text="Files")
-        self.jacket = tk.StringVar()
-        self.track = tk.StringVar()
-        self.track_pre = tk.StringVar()
-
-        self._file_picker(
-            tab,
-            0,
-            "Jacket (image)*",
-            self.jacket,
-            [
-                ("Images", "*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tga *.tif *.tiff"),
-                ("All", "*.*"),
-            ],
-        )
-        self._file_picker(
-            tab,
-            1,
-            "Audio track*",
-            self.track,
-            [("Audio", "*.wav *.mp3 *.flac *.ogg *.m4a *.aac *.opus"), ("All", "*.*")],
-        )
-        self._file_picker(
-            tab,
-            2,
-            "Preview audio (≤45s)*",
-            self.track_pre,
-            [("Audio", "*.wav *.mp3 *.flac *.ogg *.m4a *.aac *.opus"), ("All", "*.*")],
-        )
-
-        ttk.Separator(tab, orient="horizontal").grid(
-            row=3, column=0, columnspan=3, sticky="ew", pady=10
-        )
-        ttk.Label(tab, text="Music videos (optional, up to 2):").grid(
-            row=4, column=0, columnspan=3, sticky="w", padx=8
-        )
-        self.mv_frame = ttk.Frame(tab)
-        self.mv_frame.grid(row=5, column=0, columnspan=3, sticky="ew", padx=4)
-        ttk.Button(tab, text="+ Add music video", command=self._add_mv_row).grid(
-            row=6, column=0, sticky="w", padx=8, pady=4
-        )
-        tab.columnconfigure(1, weight=1)
-
-    def _file_picker(self, parent, row, label, var, filetypes):
-        ttk.Label(parent, text=label).grid(
-            row=row, column=0, sticky="w", padx=8, pady=6
-        )
-        ttk.Entry(parent, textvariable=var).grid(
-            row=row, column=1, sticky="ew", padx=4, pady=6
-        )
-        ttk.Button(
-            parent, text="Browse…", command=lambda: self._browse(var, filetypes)
-        ).grid(row=row, column=2, padx=8, pady=6)
-
-    def _browse(self, var, filetypes):
-        p = filedialog.askopenfilename(filetypes=filetypes)
-        if p:
-            var.set(p)
-
-    def _add_mv_row(self):
-        if len(self.mv_rows) >= 2:
-            return
-        r = MVRow(
-            kind=tk.StringVar(value=MV_TYPES[len(self.mv_rows) % 2]),
-            path=tk.StringVar(),
-        )
-        self.mv_rows.append(r)
-        self._redraw_mv()
-
-    def _redraw_mv(self):
-        for w in self.mv_frame.winfo_children():
-            w.destroy()
-        for i, r in enumerate(self.mv_rows):
-            ttk.Combobox(
-                self.mv_frame,
-                textvariable=r.kind,
-                values=MV_TYPES,
-                state="readonly",
-                width=7,
-            ).grid(row=i, column=0, padx=4, pady=3)
-            ttk.Entry(self.mv_frame, textvariable=r.path, width=60).grid(
-                row=i, column=1, sticky="ew", padx=4
-            )
-            ttk.Button(
-                self.mv_frame,
-                text="Browse…",
-                command=lambda v=r.path: self._browse(
-                    v,
-                    [("Video", "*.mp4 *.mov *.mkv *.webm *.avi *.usm"), ("All", "*.*")],
-                ),
-            ).grid(row=i, column=2, padx=4)
-            ttk.Button(
-                self.mv_frame,
-                text="✕",
-                command=lambda rr=r: (self.mv_rows.remove(rr), self._redraw_mv()),
-            ).grid(row=i, column=3, padx=4)
-        self.mv_frame.columnconfigure(1, weight=1)
-
-    def _build_charts_tab(self, nb):
-        tab = ttk.Frame(nb)
-        nb.add(tab, text="Charts")
-        ttk.Label(
-            tab,
-            text="1-6 .sus charts. Combo is auto-derived on build.",
-        ).grid(row=0, column=0, columnspan=5, sticky="w", padx=8, pady=6)
-        hdr = ttk.Frame(tab)
-        hdr.grid(row=1, column=0, columnspan=5, sticky="ew", padx=8)
-        for i, t in enumerate(["Difficulty", "Level (1-99)", ".sus file", "Combo", ""]):
-            ttk.Label(hdr, text=t, font=("", 9, "bold")).grid(
-                row=0, column=i, sticky="w", padx=4
-            )
-        self.charts_frame = ttk.Frame(tab)
-        self.charts_frame.grid(row=2, column=0, columnspan=5, sticky="nsew", padx=4)
-        ttk.Button(tab, text="+ Add chart", command=self._add_chart_row).grid(
-            row=3, column=0, sticky="w", padx=8, pady=6
-        )
-        tab.columnconfigure(0, weight=1)
-
-    def _add_chart_row(self):
-        if len(self.chart_rows) >= MAX_CHARTS:
-            return
-        used = {r.difficulty.get() for r in self.chart_rows}
-        default = next((d for d in DIFFICULTIES if d not in used), DIFFICULTIES[0])
-        r = ChartRow(
-            difficulty=tk.StringVar(value=default),
-            level=tk.StringVar(value="1"),
-            path=tk.StringVar(),
-            combo=tk.StringVar(value="-"),
-        )
-        self.chart_rows.append(r)
-        self._redraw_charts()
-
-    def _redraw_charts(self):
-        for w in self.charts_frame.winfo_children():
-            w.destroy()
-        for i, r in enumerate(self.chart_rows):
-            ttk.Combobox(
-                self.charts_frame,
-                textvariable=r.difficulty,
-                values=DIFFICULTIES,
-                state="readonly",
-                width=9,
-            ).grid(row=i, column=0, padx=4, pady=3)
-            ttk.Spinbox(
-                self.charts_frame,
-                from_=MIN_LEVEL,
-                to=MAX_LEVEL,
-                textvariable=r.level,
-                width=5,
-            ).grid(row=i, column=1, padx=4)
-            ttk.Entry(self.charts_frame, textvariable=r.path, width=46).grid(
-                row=i, column=2, padx=4, sticky="ew"
-            )
-            ttk.Button(
-                self.charts_frame,
-                text="…",
-                command=lambda v=r.path, rr=r: self._pick_sus(v, rr),
-            ).grid(row=i, column=3, padx=2)
-            ttk.Label(self.charts_frame, textvariable=r.combo, width=7).grid(
-                row=i, column=4, padx=4
-            )
-            ttk.Button(
-                self.charts_frame,
-                text="✕",
-                command=lambda rr=r: (
-                    self.chart_rows.remove(rr),
-                    self._redraw_charts(),
-                ),
-            ).grid(row=i, column=5, padx=4)
-        self.charts_frame.columnconfigure(2, weight=1)
-
-    def _pick_sus(self, var, row: ChartRow):
-        p = filedialog.askopenfilename(
-            filetypes=[("SUS chart", "*.sus"), ("All", "*.*")]
-        )
+    def rp(p):
         if not p:
-            return
-        var.set(p)
-        try:
-            row.combo.set(str(sus_combo(p)))
-        except Exception as e:
-            row.combo.set("err")
-            self.status.set(f"Combo parse failed for {os.path.basename(p)}: {e}")
+            return ""
+        p = os.path.expanduser(str(p))
+        return p if os.path.isabs(p) else os.path.normpath(os.path.join(base, p))
 
-    def _build_metadata_tab(self, nb):
-        tab = ttk.Frame(nb, padding=8)
-        nb.add(tab, text="Metadata")
-
-        self.title_t = tk.StringVar()
-        self.lyricist = tk.StringVar()
-        self.composer = tk.StringVar()
-        self.arranger = tk.StringVar()
-        self.artist = tk.StringVar()
-        self.vocals = tk.StringVar()
-        self.collab = tk.StringVar()
-        self.charter = tk.StringVar()
-        self.is_full = tk.BooleanVar(value=True)
-        self.offset_ms = tk.StringVar(value="0")
-        self.mv_offset_ms = tk.StringVar(value="0")
-        self.original = tk.StringVar()
-
-        row = [0]
-
-        def str_field(label, var, hint=""):
-            ttk.Label(tab, text=label).grid(
-                row=row[0], column=0, sticky="e", padx=4, pady=3
-            )
-            ttk.Entry(tab, textvariable=var, width=48).grid(
-                row=row[0], column=1, sticky="ew", padx=4, pady=3
-            )
-            if hint:
-                ttk.Label(tab, text=hint, foreground="#888").grid(
-                    row=row[0], column=2, sticky="w", padx=4
-                )
-            row[0] += 1
-
-        str_field("Title*", self.title_t)
-        str_field("Charter*", self.charter)
-        str_field("Lyricist*", self.lyricist)
-        str_field("Composer*", self.composer)
-        str_field("Arranger*", self.arranger)
-        str_field("Artist*", self.artist)
-        str_field("Vocals*", self.vocals)
-        ttk.Checkbutton(
-            tab, text="Full-length (not a game-size cut)", variable=self.is_full
-        ).grid(row=row[0], column=1, sticky="w", padx=4, pady=3)
-        row[0] += 1
-        str_field("offset_ms", self.offset_ms, "chart timing offset (int)")
-        str_field("additional_mv_offset_ms", self.mv_offset_ms, "extra MV offset (int)")
-        str_field("original (URL)", self.original, "optional")
-        str_field("Collab (optional)", self.collab)
-        tab.columnconfigure(1, weight=1)
-
-    def _build_vocals_tab(self, nb):
-        tab = ttk.Frame(nb, padding=8)
-        nb.add(tab, text="Vocals")
-        ttk.Label(
-            tab,
-            wraplength=840,
-            justify="left",
-            text=(
-                "Alt vocals (covers). Leave empty for a single-vocal song. If you add alt vocals, "
-                "name the DEFAULT vocal below (it uses the main track + jacket), then add each "
-                "alternate with its own audio/preview and an optional jacket."
-            ),
-        ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
-
-        self.default_vocal_name = tk.StringVar()
-        self.default_vocal_type = tk.StringVar(value="sekai")
-        df = ttk.LabelFrame(tab, text="Default vocal (uses the main track)", padding=6)
-        df.grid(row=1, column=0, columnspan=4, sticky="ew", pady=4)
-        ttk.Label(df, text="Name").grid(row=0, column=0, sticky="e", padx=4)
-        ttk.Entry(df, textvariable=self.default_vocal_name, width=28).grid(
-            row=0, column=1, padx=4
-        )
-        ttk.Label(df, text="Type").grid(row=0, column=2, sticky="e", padx=4)
-        ttk.Combobox(
-            df,
-            textvariable=self.default_vocal_type,
-            values=VOCAL_TYPES,
-            state="readonly",
-            width=16,
-        ).grid(row=0, column=3, padx=4)
-
-        self.vocals_frame = ttk.Frame(tab)
-        self.vocals_frame.grid(row=2, column=0, columnspan=4, sticky="nsew", pady=4)
-        ttk.Button(tab, text="+ Add alt vocal", command=self._add_alt_vocal).grid(
-            row=3, column=0, sticky="w", pady=6
-        )
-        tab.columnconfigure(0, weight=1)
-
-    def _add_alt_vocal(self):
-        self.alt_vocals.append(
-            AltVocal(
-                name=tk.StringVar(),
-                vocals=tk.StringVar(),
-                vocal_type=tk.StringVar(value="original_song"),
-                audio=tk.StringVar(),
-                preview=tk.StringVar(),
-                jacket=tk.StringVar(),
-            )
-        )
-        self._redraw_vocals()
-
-    def _redraw_vocals(self):
-        for w in self.vocals_frame.winfo_children():
-            w.destroy()
-        audio_ft = [
-            ("Audio", "*.wav *.mp3 *.flac *.ogg *.m4a *.aac *.opus"),
-            ("All", "*.*"),
-        ]
-        img_ft = [
-            ("Images", "*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tga *.tif *.tiff"),
-            ("All", "*.*"),
-        ]
-        for i, v in enumerate(self.alt_vocals):
-            f = ttk.LabelFrame(self.vocals_frame, text=f"Alt vocal {i + 1}", padding=6)
-            f.pack(fill="x", pady=3)
-            ttk.Label(f, text="Name").grid(row=0, column=0, sticky="e", padx=4, pady=2)
-            ttk.Entry(f, textvariable=v.name, width=40).grid(
-                row=0, column=1, sticky="ew", padx=4, pady=2
-            )
-            ttk.Label(f, text="Vocals").grid(
-                row=1, column=0, sticky="e", padx=4, pady=2
-            )
-            ttk.Entry(f, textvariable=v.vocals, width=40).grid(
-                row=1, column=1, sticky="ew", padx=4, pady=2
-            )
-            ttk.Label(f, text="Type").grid(row=2, column=0, sticky="e", padx=4)
-            ttk.Combobox(
-                f,
-                textvariable=v.vocal_type,
-                values=VOCAL_TYPES,
-                state="readonly",
-                width=16,
-            ).grid(row=2, column=1, sticky="w", padx=4)
-            for row, label, var, ft in [
-                (3, "Audio", v.audio, audio_ft),
-                (4, "Preview", v.preview, audio_ft),
-                (5, "Jacket (opt)", v.jacket, img_ft),
-            ]:
-                ttk.Label(f, text=label).grid(
-                    row=row, column=0, sticky="e", padx=4, pady=2
-                )
-                ttk.Entry(f, textvariable=var, width=40).grid(
-                    row=row, column=1, sticky="ew", padx=4, pady=2
-                )
-                ttk.Button(
-                    f, text="…", command=lambda vv=var, t=ft: self._browse(vv, t)
-                ).grid(row=row, column=2, padx=2)
-            ttk.Button(
-                f,
-                text="Remove",
-                command=lambda vv=v: (
-                    self.alt_vocals.remove(vv),
-                    self._redraw_vocals(),
-                ),
-            ).grid(row=6, column=1, sticky="w", pady=4)
-            f.columnconfigure(1, weight=1)
-
-    def _build_identifier_tab(self, nb):
-        tab = ttk.Frame(nb)
-        nb.add(tab, text="Identity")
-
-        self.identifier = tk.StringVar(value=gen_double_uuid())
-        ttk.Label(
-            tab,
-            wraplength=820,
-            justify="left",
-            text=(
-                "This identifier uniquely names the chart. Re-exporting with the same identifier "
-                "updates that chart in the game instead of adding a duplicate. Keep this value "
-                "after your first export so you can reuse it for updates. You may paste your own: "
-                "it must be two valid v4 UUIDs joined by '_'."
-            ),
-        ).pack(anchor="w", padx=10, pady=10)
-        rowf = ttk.Frame(tab)
-        rowf.pack(fill="x", padx=10)
-        ttk.Entry(rowf, textvariable=self.identifier, width=80).pack(
-            side="left", fill="x", expand=True
-        )
-        ttk.Button(
-            rowf,
-            text="Regenerate",
-            command=lambda: self.identifier.set(gen_double_uuid()),
-        ).pack(side="left", padx=6)
-        ttk.Button(rowf, text="Copy", command=self._copy_identifier).pack(side="left")
-
-    def _copy_identifier(self):
-        self.clipboard_clear()
-        self.clipboard_append(self.identifier.get())
-        self.status.set("Identifier copied to clipboard.")
-
-    def _collect(self) -> dict | None:
-        errs: list[str] = []
-
-        def need(path, label):
-            if not path or not os.path.isfile(path):
-                errs.append(f"{label} is required.")
-                return False
-            return True
-
-        if need(self.jacket.get(), "Jacket"):
-            ok, msg = validate_image(self.jacket.get())
-            if not ok:
-                errs.append(f"Jacket: {msg}")
-
-        ff = ffprobe_available()
-        if (
-            need(self.track.get(), "Audio track")
-            and ff
-            and not has_stream(self.track.get(), "audio")
-        ):
-            errs.append("Audio track has no audio stream.")
-        if need(self.track_pre.get(), "Preview audio") and ff:
-            dur = media_duration(self.track_pre.get())
-            if dur is None:
-                errs.append("Preview audio: could not read duration.")
-            elif dur > MAX_PREVIEW_SECONDS + 0.05:
-                errs.append(
-                    f"Preview audio is {dur:.1f}s (max {MAX_PREVIEW_SECONDS:.0f}s)."
-                )
-
-        diffs = []
-        seen = set()
-        rows = [r for r in self.chart_rows if r.path.get().strip()]
-        if not rows:
-            errs.append("At least one .sus chart is required.")
-        for r in rows:
-            d = r.difficulty.get()
-            if d in seen:
-                errs.append(f"Duplicate difficulty '{d}'.")
-            seen.add(d)
-            if not os.path.isfile(r.path.get()):
-                errs.append(f"{d}: .sus file not found.")
-                continue
-            try:
-                lvl = int(r.level.get())
-            except ValueError:
-                errs.append(f"{d}: level must be a number.")
-                continue
-            if not (MIN_LEVEL <= lvl <= MAX_LEVEL):
-                errs.append(f"{d}: level must be {MIN_LEVEL}-{MAX_LEVEL}.")
-            try:
-                text = open(r.path.get(), "r", encoding="utf-8").read()
-            except Exception as e:
-                errs.append(f"{d}: cannot read .sus ({e}).")
-                continue
-            ok, msg = validate_sus_text(text)
-            if not ok:
-                errs.append(f"{d}: {msg}.")
-            try:
-                combo = sus_combo(r.path.get())
-            except Exception as e:
-                errs.append(f"{d}: combo derivation failed ({e}).")
-                continue
-            r.combo.set(str(combo))
-            diffs.append(
-                {"difficulty": d, "level": lvl, "notes": combo, "_path": r.path.get()}
-            )
-
-        og_mv = next(
-            (
-                r.path.get()
-                for r in self.mv_rows
-                if r.kind.get() == "ogmv" and r.path.get().strip()
-            ),
-            None,
-        )
-        two_d_mv = next(
-            (
-                r.path.get()
-                for r in self.mv_rows
-                if r.kind.get() == "2dmv" and r.path.get().strip()
-            ),
-            None,
-        )
-        for label, p in (("ogmv", og_mv), ("2dmv", two_d_mv)):
-            if p:
-                if not os.path.isfile(p):
-                    errs.append(f"{label}: file not found.")
-                elif ff and not has_stream(p, "video"):
-                    errs.append(f"{label}: no video stream.")
-
-        def req_str(var, label):
-            if not var.get().strip():
-                errs.append(f"{label} is required.")
-
-        req_str(self.title_t, "Title")
-        if not self.charter.get().strip():
-            errs.append("Charter is required.")
-        for var, lab in [
-            (self.lyricist, "Lyricist"),
-            (self.composer, "Composer"),
-            (self.arranger, "Arranger"),
-            (self.artist, "Artist"),
-            (self.vocals, "Vocals"),
-        ]:
-            req_str(var, lab)
-
-        def parse_int(var, label, default=0):
-            s = var.get().strip()
-            if not s:
-                return default
-            try:
-                return int(s)
-            except ValueError:
-                errs.append(f"{label} must be an integer.")
-                return default
-
-        offset = parse_int(self.offset_ms, "offset_ms")
-        mv_offset = parse_int(self.mv_offset_ms, "additional_mv_offset_ms")
-
-        mv_kinds = [r.kind.get() for r in self.mv_rows if r.path.get().strip()]
-        if mv_kinds.count("ogmv") > 1:
-            errs.append(
-                "Only one 'ogmv' music video is allowed (ogmv/ogmv is unsupported)."
-            )
-        if mv_kinds.count("2dmv") > 1:
-            errs.append(
-                "Only one '2dmv' music video is allowed (2dmv/2dmv is unsupported)."
-            )
-
-        cover_files = []
-        alt_entries = []
-        alts = [
-            v
-            for v in self.alt_vocals
-            if v.name.get().strip() or v.audio.get().strip() or v.vocals.get().strip()
-        ]
-        if alts and not self.default_vocal_name.get().strip():
-            errs.append("Default vocal name is required when alt vocals are present.")
-        for idx, v in enumerate(alts, start=1):
-            nm, vo = v.name.get().strip(), v.vocals.get().strip()
-            au, pv, jk = (
-                v.audio.get().strip(),
-                v.preview.get().strip(),
-                v.jacket.get().strip(),
-            )
-            if not nm:
-                errs.append(f"Alt vocal {idx}: name is required.")
-            if not vo:
-                errs.append(f"Alt vocal {idx}: vocals are required.")
-            if not au or not os.path.isfile(au):
-                errs.append(f"Alt vocal {idx}: audio file is required.")
-            elif ff and not has_stream(au, "audio"):
-                errs.append(f"Alt vocal {idx}: audio has no audio stream.")
-            if not pv or not os.path.isfile(pv):
-                errs.append(f"Alt vocal {idx}: preview is required.")
-            elif ff:
-                d = media_duration(pv)
-                if d is not None and d > MAX_PREVIEW_SECONDS + 0.05:
-                    errs.append(
-                        f"Alt vocal {idx}: preview is {d:.1f}s (max {MAX_PREVIEW_SECONDS:.0f}s)."
-                    )
-            has_jacket = bool(jk)
-            if has_jacket:
-                if not os.path.isfile(jk):
-                    errs.append(f"Alt vocal {idx}: jacket not found.")
-                else:
-                    ok, msg = validate_image(jk)
-                    if not ok:
-                        errs.append(f"Alt vocal {idx}: jacket {msg}")
-            alt_entries.append(
-                {
-                    "id": idx,
-                    "name": nm,
-                    "vocals": vo,
-                    "vocal_type": v.vocal_type.get(),
-                    "has_jacket": has_jacket,
-                }
-            )
-            if au:
-                cover_files.append((au, f"covers/cover_{idx}" + ext_of(au)))
-            if pv:
-                cover_files.append((pv, f"covers/cover_pre_{idx}" + ext_of(pv)))
-            if jk:
-                cover_files.append((jk, f"covers/cover_jacket_{idx}" + ext_of(jk)))
-
-        song_duration = None
-        if self.track.get().strip() and ffprobe_available():
-            song_duration = media_duration(self.track.get())
-            if song_duration is not None:
-                song_duration = round(song_duration, 3)
-
-        if not validate_double_uuid(self.identifier.get()):
-            errs.append("Identifier must be two valid v4 UUIDs joined by '_'.")
-
-        if errs:
-            messagebox.showerror("Cannot build", "\n".join("• " + e for e in errs))
-            return None
-
-        def tr(var):
-            v = var.get().strip()
-            return {"jp": v, "en": v}
-
-        info = {
-            "identifier": self.identifier.get().strip(),
-            "format_version": FORMAT_VERSION,
-            "title": tr(self.title_t),
-            "charter": self.charter.get().strip(),
-            "difficulties": [
-                {
-                    "difficulty": d["difficulty"],
-                    "level": d["level"],
-                    "notes": d["notes"],
-                }
-                for d in diffs
-            ],
-            "lyricist": tr(self.lyricist),
-            "composer": tr(self.composer),
-            "arranger": tr(self.arranger),
-            "artist": tr(self.artist),
-            "vocals": tr(self.vocals),
-            "isFullLength": self.is_full.get(),
-            "vocaloid_or_other": "other",
-            "offset_ms": offset,
-            "additional_mv_offset_ms": mv_offset,
-            "song_duration": song_duration,
-            "original": self.original.get().strip() or None,
-            "original_music_video": og_mv is not None,
-            "2d_music_video": two_d_mv is not None,
+    for k in PATH_KEYS:
+        cfg[k] = rp(cfg[k])
+    cfg["mvs"] = [
+        {"kind": m.get("kind", "ogmv"), "path": rp(m.get("path"))}
+        for m in cfg.get("mvs") or []
+    ]
+    cfg["charts"] = [
+        {
+            "difficulty": c.get("difficulty", "expert"),
+            "level": c.get("level", 1),
+            "path": rp(c.get("path")),
         }
-        if self.collab.get().strip():
-            info["collab"] = tr(self.collab)
-
-        if alt_entries:
-
-            def d2(s):
-                return {"jp": s, "en": s}
-
-            covers = [
-                {
-                    "default": True,
-                    "name": d2(self.default_vocal_name.get().strip()),
-                    "vocal_type": self.default_vocal_type.get(),
-                }
-            ]
-            for a in alt_entries:
-                covers.append(
-                    {
-                        "default": False,
-                        "id": a["id"],
-                        "name": d2(a["name"]),
-                        "vocals": d2(a["vocals"]),
-                        "vocal_type": a["vocal_type"],
-                        "has_jacket": a["has_jacket"],
-                    }
-                )
-            info["covers"] = covers
-
-        return {
-            "info": info,
-            "diffs": diffs,
-            "jacket": self.jacket.get(),
-            "track": self.track.get(),
-            "track_pre": self.track_pre.get(),
-            "ogmv": og_mv,
-            "2dmv": two_d_mv,
-            "cover_files": cover_files,
+        for c in cfg.get("charts") or []
+    ]
+    cfg["alt_vocals"] = [
+        {
+            "name": a.get("name", ""),
+            "vocals": a.get("vocals", ""),
+            "type": a.get("type", "original_song"),
+            "audio": rp(a.get("audio")),
+            "preview": rp(a.get("preview")),
+            "jacket": rp(a.get("jacket")),
         }
+        for a in cfg.get("alt_vocals") or []
+    ]
+    dv = cfg.get("default_vocal") or {}
+    cfg["default_vocal"] = {"name": dv.get("name", ""), "type": dv.get("type", "sekai")}
+    return cfg
 
-    def build(self):
-        data = self._collect()
-        if not data:
-            return
-        default_name = (
-            data["info"]["title"]["en"] or data["info"]["title"]["jp"] or "custom_chart"
-        )
-        default_name = (
-            re.sub(r"[^\w\-. ]+", "_", default_name).strip() or "custom_chart"
-        )
-        out = filedialog.asksaveasfilename(
-            defaultextension=".zip",
-            initialfile=default_name + ".zip",
-            filetypes=[("Zip", "*.zip")],
-        )
-        if not out:
-            return
-        try:
-            self._write_zip(out, data)
-        except Exception as e:
-            messagebox.showerror("Build failed", str(e))
-            return
-        self.status.set(f"Built {os.path.basename(out)}")
-        messagebox.showinfo(
-            "Done",
-            f"Built:\n{out}\n\nKeep the ZIP for when you want to update the chart.",
-        )
 
-    def _write_zip(self, out: str, data: dict):
-        info = data["info"]
-        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-            z.writestr("ChartInfo.json", json.dumps(info, ensure_ascii=False, indent=2))
-            z.write(data["jacket"], "jacket" + ext_of(data["jacket"]))
-            z.write(data["track"], "track" + ext_of(data["track"]))
-            z.write(data["track_pre"], "track_pre" + ext_of(data["track_pre"]))
-            for d in data["diffs"]:
-                z.write(d["_path"], f"{d['difficulty']}.sus")
-            if data["ogmv"]:
-                z.write(data["ogmv"], "mv" + ext_of(data["ogmv"]))
-            if data["2dmv"]:
-                z.write(data["2dmv"], "2dmv" + ext_of(data["2dmv"]))
-            for src, zip_name in data.get("cover_files", []):
-                z.write(src, zip_name)
+def save_config(cfg: dict, path: str) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
 
-    def _find(self, stem: str) -> str | None:
-        if not self._import_tmp:
-            return None
-        for root, _dirs, files in os.walk(self._import_tmp):
-            for fn in files:
-                if os.path.splitext(fn)[0] == stem:
-                    return os.path.join(root, fn)
-        return None
 
-    def import_zip(self):
-        path = filedialog.askopenfilename(
-            title="Import a built chart .zip",
-            filetypes=[("Chart zip", "*.zip"), ("All", "*.*")],
-        )
-        if not path:
-            return
-        try:
-            self._load_from_zip(path)
-        except Exception as e:
-            messagebox.showerror("Import failed", str(e))
-            return
-        self.status.set(f"Imported {os.path.basename(path)}, fields repopulated.")
+# --------------------------------------------------------------------------- #
+# Prompt helpers
+# --------------------------------------------------------------------------- #
 
-    def _load_from_zip(self, path: str):
-        if self._import_tmp and os.path.isdir(self._import_tmp):
-            shutil.rmtree(self._import_tmp, ignore_errors=True)
-        self._import_tmp = tempfile.mkdtemp(prefix="gs6chart_")
-        with zipfile.ZipFile(path) as z:
-            z.extractall(self._import_tmp)
-        info_path = os.path.join(self._import_tmp, "ChartInfo.json")
-        if not os.path.isfile(info_path):
-            raise ValueError("ChartInfo.json not found in the zip.")
-        with open(info_path, "r", encoding="utf-8") as f:
-            info = json.load(f)
 
-        def one(v) -> str:
-            if isinstance(v, dict):
-                return v.get("en") or v.get("jp") or ""
-            return v or ""
+class Abort(Exception):
+    pass
 
-        self.jacket.set(self._find("jacket") or "")
-        self.track.set(self._find("track") or "")
-        self.track_pre.set(self._find("track_pre") or "")
 
-        self.mv_rows.clear()
-        if self._find("mv"):
-            self.mv_rows.append(
-                MVRow(
-                    kind=tk.StringVar(value="ogmv"),
-                    path=tk.StringVar(value=self._find("mv")),
-                )
-            )
-        if self._find("2dmv"):
-            self.mv_rows.append(
-                MVRow(
-                    kind=tk.StringVar(value="2dmv"),
-                    path=tk.StringVar(value=self._find("2dmv")),
-                )
-            )
-        self._redraw_mv()
+def _input(prompt: str) -> str:
+    try:
+        return input(prompt)
+    except EOFError:
+        raise Abort()
 
-        self.chart_rows.clear()
-        for d in info.get("difficulties", []):
-            diff = d.get("difficulty", "expert")
-            self.chart_rows.append(
-                ChartRow(
-                    difficulty=tk.StringVar(value=diff),
-                    level=tk.StringVar(value=str(d.get("level", 1))),
-                    path=tk.StringVar(value=self._find(diff) or ""),
-                    combo=tk.StringVar(value=str(d.get("notes", "-"))),
-                )
-            )
-        if not self.chart_rows:
-            self._add_chart_row()
+
+def section(title: str) -> None:
+    print(f"\n=== {title} " + "=" * max(0, 60 - len(title)))
+
+
+def ask(label, default="", required=False, validate=None) -> str:
+    """Prompt for a string. Enter keeps the default; '-' clears an optional field."""
+    while True:
+        shown = f" [{default}]" if default not in ("", None) else ""
+        raw = _input(f"{label}{shown}: ").strip()
+        if raw == "-" and not required:
+            val = ""
+        elif raw == "":
+            val = "" if default is None else str(default)
         else:
-            self._redraw_charts()
+            val = raw
+        if required and not val:
+            print("  ! required.")
+            continue
+        if validate and val:
+            err = validate(val)
+            if err:
+                print(f"  ! {err}")
+                continue
+        return val
 
-        self.title_t.set(one(info.get("title")))
-        self.charter.set(info.get("charter", "") or "")
-        self.lyricist.set(one(info.get("lyricist")))
-        self.composer.set(one(info.get("composer")))
-        self.arranger.set(one(info.get("arranger")))
-        self.artist.set(one(info.get("artist")))
-        self.vocals.set(one(info.get("vocals")))
-        self.collab.set(one(info.get("collab")))
-        self.is_full.set(bool(info.get("isFullLength", True)))
-        self.offset_ms.set(str(info.get("offset_ms", 0)))
-        self.mv_offset_ms.set(str(info.get("additional_mv_offset_ms", 0)))
-        self.original.set(info.get("original") or "")
 
-        if info.get("identifier"):
-            self.identifier.set(info["identifier"])
+def ask_yn(label: str, default: bool = False) -> bool:
+    hint = "Y/n" if default else "y/N"
+    while True:
+        raw = _input(f"{label} [{hint}]: ").strip().lower()
+        if not raw:
+            return default
+        if raw in ("y", "yes"):
+            return True
+        if raw in ("n", "no"):
+            return False
+        print("  ! please answer y or n.")
 
-        self.alt_vocals.clear()
-        self.default_vocal_name.set("")
-        self.default_vocal_type.set("sekai")
-        for c in info.get("covers", []):
-            if c.get("default"):
-                self.default_vocal_name.set(one(c.get("name")))
-                self.default_vocal_type.set(c.get("vocal_type", "sekai"))
-            else:
-                cid = c.get("id")
-                self.alt_vocals.append(
-                    AltVocal(
-                        name=tk.StringVar(value=one(c.get("name"))),
-                        vocals=tk.StringVar(value=one(c.get("vocals"))),
-                        vocal_type=tk.StringVar(
-                            value=c.get("vocal_type", "original_song")
-                        ),
-                        audio=tk.StringVar(value=self._find(f"cover_{cid}") or ""),
-                        preview=tk.StringVar(
-                            value=self._find(f"cover_pre_{cid}") or ""
-                        ),
-                        jacket=tk.StringVar(
-                            value=self._find(f"cover_jacket_{cid}") or ""
-                        ),
-                    )
-                )
-        self._redraw_vocals()
 
-    def compile_gs6(self):
-        data = self._collect()
-        if not data:
-            return
+def ask_int(label, default=0, lo=None, hi=None) -> int:
+    rng = ""
+    if lo is not None and hi is not None:
+        rng = f" ({lo}-{hi})"
+    elif lo is not None:
+        rng = f" (>= {lo})"
+    while True:
+        raw = _input(f"{label}{rng} [{default}]: ").strip()
+        if not raw:
+            return int(default)
         try:
-            import encode
-        except Exception as e:
-            messagebox.showerror(
-                "Compiler unavailable",
-                f"Could not load the encoder (encode.py):\n{e}\n\n"
-                "The .chart.gs6 compiler needs cricodecs, UnityPy, Pillow and ffmpeg "
-                "(see requirements.txt) plus the base bundles in the bases folder.",
-            )
-            return
-        bases = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bases")
-        missing = encode.missing_bases(bases, want_mv=(data["ogmv"] or data["2dmv"]))
-        if missing:
-            messagebox.showerror(
-                "Missing base bundles",
-                "These base bundles are required but not found in the bases folder:\n\n"
-                + "\n".join(missing),
-            )
-            return
-        default_name = (
-            re.sub(
-                r"[^\w\-. ]+",
-                "_",
-                (
-                    data["info"]["title"]["en"]
-                    or data["info"]["title"]["jp"]
-                    or "custom_chart"
+            v = int(raw)
+        except ValueError:
+            print("  ! must be an integer.")
+            continue
+        if (lo is not None and v < lo) or (hi is not None and v > hi):
+            print(f"  ! out of range{rng}.")
+            continue
+        return v
+
+
+def ask_choice(label: str, choices: list[str], default: str) -> str:
+    opts = " / ".join(f"{i + 1}={c}" for i, c in enumerate(choices))
+    while True:
+        raw = _input(f"{label} ({opts}) [{default}]: ").strip().lower()
+        if not raw:
+            return default
+        if raw in choices:
+            return raw
+        if raw.isdigit() and 1 <= int(raw) <= len(choices):
+            return choices[int(raw) - 1]
+        print("  ! pick one of the listed options.")
+
+
+def clean_path(raw: str) -> str:
+    """Handle drag-and-dropped paths: surrounding quotes, escaped spaces, ~."""
+    p = raw.strip()
+    if len(p) >= 2 and p[0] == p[-1] and p[0] in "\"'":
+        p = p[1:-1]
+    if os.name != "nt":
+        p = p.replace("\\ ", " ")
+    return os.path.expanduser(p)
+
+
+def ask_path(label, default="", required=True, validate=None) -> str:
+    while True:
+        shown = f" [{default}]" if default else ""
+        raw = _input(f"{label}{shown}: ").strip()
+        if raw == "-" and not required:
+            return ""
+        p = clean_path(raw) if raw else (default or "")
+        if not p:
+            if required:
+                print("  ! required.")
+                continue
+            return ""
+        if not os.path.isfile(p):
+            print(f"  ! file not found: {p}")
+            continue
+        if validate:
+            err = validate(p)
+            if err:
+                print(f"  ! {err}")
+                continue
+        return p
+
+
+# Per-field validators (return an error string, or "" if fine)
+
+
+def v_image(p: str) -> str:
+    ok, msg = validate_image(p)
+    return "" if ok else msg
+
+
+def v_audio(p: str) -> str:
+    if ffprobe_available() and not has_stream(p, "audio"):
+        return "no audio stream found."
+    return ""
+
+
+def v_preview(p: str) -> str:
+    err = v_audio(p)
+    if err:
+        return err
+    if ffprobe_available():
+        d = media_duration(p)
+        if d is None:
+            return "could not read duration."
+        if d > MAX_PREVIEW_SECONDS + 0.05:
+            return f"preview is {d:.1f}s (max {MAX_PREVIEW_SECONDS:.0f}s)."
+    return ""
+
+
+def v_video(p: str) -> str:
+    if ffprobe_available() and not has_stream(p, "video"):
+        return "no video stream found."
+    return ""
+
+
+def v_sus(p: str) -> str:
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            text = f.read()
+    except Exception as e:
+        return f"cannot read .sus ({e})."
+    ok, msg = validate_sus_text(text)
+    if not ok:
+        return msg + "."
+    try:
+        print(f"    combo: {sus_combo(p)}")
+    except Exception as e:
+        return f"combo derivation failed ({e})."
+    return ""
+
+
+# --------------------------------------------------------------------------- #
+# Interactive section editors
+# --------------------------------------------------------------------------- #
+
+
+def edit_files(cfg: dict) -> None:
+    section("Files")
+    if not ffprobe_available():
+        print("  (ffprobe not found on PATH: audio/video/preview checks are skipped)")
+    cfg["jacket"] = ask_path("Jacket image", cfg["jacket"], validate=v_image)
+    cfg["track"] = ask_path("Audio track", cfg["track"], validate=v_audio)
+    cfg["track_pre"] = ask_path(
+        f"Preview audio (<= {MAX_PREVIEW_SECONDS:.0f}s)",
+        cfg["track_pre"],
+        validate=v_preview,
+    )
+    n = ask_int("Number of music videos", len(cfg["mvs"]), 0, 2)
+    old = cfg["mvs"]
+    mvs = []
+    for i in range(n):
+        prev = old[i] if i < len(old) else {}
+        kind = ask_choice(
+            f"  MV {i + 1} type", MV_TYPES, prev.get("kind", MV_TYPES[i % 2])
+        )
+        path = ask_path(f"  MV {i + 1} file", prev.get("path", ""), validate=v_video)
+        mvs.append({"kind": kind, "path": path})
+    cfg["mvs"] = mvs
+
+
+def edit_charts(cfg: dict) -> None:
+    section("Charts (.sus)")
+    n = ask_int("Number of charts", max(1, len(cfg["charts"])), 1, MAX_CHARTS)
+    old = cfg["charts"]
+    charts = []
+    for i in range(n):
+        prev = old[i] if i < len(old) else {}
+        used = {c["difficulty"] for c in charts}
+        fallback = next((d for d in DIFFICULTIES if d not in used), DIFFICULTIES[0])
+        print(f"- Chart {i + 1}")
+        while True:
+            diff = ask_choice("  difficulty", DIFFICULTIES, prev.get("difficulty", fallback))
+            if diff in used:
+                print(f"  ! '{diff}' already used.")
+                prev = {}
+                continue
+            break
+        level = ask_int("  level", prev.get("level", 1), MIN_LEVEL, MAX_LEVEL)
+        path = ask_path("  .sus file", prev.get("path", ""), validate=v_sus)
+        charts.append({"difficulty": diff, "level": level, "path": path})
+    cfg["charts"] = charts
+
+
+def edit_metadata(cfg: dict) -> None:
+    section("Metadata  (* = required, '-' clears optional fields)")
+    for key, label, req in [
+        ("title", "Title*", True),
+        ("charter", "Charter*", True),
+        ("lyricist", "Lyricist*", True),
+        ("composer", "Composer*", True),
+        ("arranger", "Arranger*", True),
+        ("artist", "Artist*", True),
+        ("vocals", "Vocals*", True),
+    ]:
+        cfg[key] = ask(label, cfg[key], required=req)
+    cfg["is_full"] = ask_yn("Full-length (not a game-size cut)?", cfg["is_full"])
+    cfg["offset_ms"] = ask_int("offset_ms (chart timing offset)", cfg["offset_ms"])
+    cfg["mv_offset_ms"] = ask_int(
+        "additional_mv_offset_ms (extra MV offset)", cfg["mv_offset_ms"]
+    )
+    cfg["original"] = ask("original URL (optional)", cfg["original"])
+    cfg["collab"] = ask("Collab (optional)", cfg["collab"])
+
+
+def edit_vocals(cfg: dict) -> None:
+    section("Vocals (alt vocals / covers)")
+    print(
+        "Leave off for a single-vocal song. If you add alt vocals, name the DEFAULT\n"
+        "vocal (it uses the main track + jacket), then add each alternate with its\n"
+        "own audio/preview and an optional jacket."
+    )
+    if not ask_yn("Add alternate vocals?", bool(cfg["alt_vocals"])):
+        cfg["alt_vocals"] = []
+        cfg["default_vocal"] = {"name": "", "type": "sekai"}
+        return
+    dv = cfg["default_vocal"]
+    dv["name"] = ask("Default vocal name", dv["name"], required=True)
+    dv["type"] = ask_choice("Default vocal type", VOCAL_TYPES, dv["type"])
+    n = ask_int("Number of alt vocals", max(1, len(cfg["alt_vocals"])), 1)
+    old = cfg["alt_vocals"]
+    alts = []
+    for i in range(n):
+        prev = old[i] if i < len(old) else {}
+        print(f"- Alt vocal {i + 1}")
+        alts.append(
+            {
+                "name": ask("  name", prev.get("name", ""), required=True),
+                "vocals": ask("  vocals", prev.get("vocals", ""), required=True),
+                "type": ask_choice(
+                    "  type", VOCAL_TYPES, prev.get("type", "original_song")
                 ),
-            ).strip()
-            or "custom_chart"
+                "audio": ask_path("  audio", prev.get("audio", ""), validate=v_audio),
+                "preview": ask_path(
+                    "  preview", prev.get("preview", ""), validate=v_preview
+                ),
+                "jacket": ask_path(
+                    "  jacket (optional)",
+                    prev.get("jacket", ""),
+                    required=False,
+                    validate=v_image,
+                ),
+            }
         )
-        out = filedialog.asksaveasfilename(
-            title="Choose a base name (writes .android.chart.gs6 and .ios.chart.gs6)",
-            initialfile=default_name,
-            filetypes=[("Compiled chart", "*.chart.gs6"), ("All", "*.*")],
+    cfg["alt_vocals"] = alts
+
+
+def edit_identity(cfg: dict) -> None:
+    section("Identity")
+    print(
+        "This identifier uniquely names the chart. Re-exporting with the same identifier\n"
+        "updates that chart in the game instead of adding a duplicate. Keep it after\n"
+        "your first export. Custom values must be two valid v4 UUIDs joined by '_'."
+    )
+    print(f"Current: {cfg['identifier']}")
+
+    def check(v: str) -> str:
+        if v.lower() == "new":
+            return ""
+        return "" if validate_double_uuid(v) else "must be two valid v4 UUIDs joined by '_'."
+
+    val = ask("Identifier (Enter = keep, 'new' = regenerate)", cfg["identifier"], validate=check)
+    cfg["identifier"] = gen_double_uuid() if val.lower() == "new" else val.strip()
+
+
+def show_summary(cfg: dict) -> None:
+    section("Summary")
+    print(f"Title      : {cfg['title'] or '(unset)'}   Charter: {cfg['charter'] or '(unset)'}")
+    print(
+        f"Artist     : {cfg['artist'] or '-'}  | Vocals: {cfg['vocals'] or '-'}  "
+        f"| Composer: {cfg['composer'] or '-'}"
+    )
+    print(f"Jacket     : {cfg['jacket'] or '(unset)'}")
+    print(f"Track      : {cfg['track'] or '(unset)'}")
+    print(f"Preview    : {cfg['track_pre'] or '(unset)'}")
+    for m in cfg["mvs"]:
+        print(f"MV ({m['kind']:>4}) : {m['path']}")
+    for c in cfg["charts"]:
+        print(f"Chart      : {c['difficulty']:<7} Lv{c['level']:<3} {c['path']}")
+    if cfg["alt_vocals"]:
+        print(
+            f"Vocals     : default '{cfg['default_vocal']['name']}' + "
+            f"{len(cfg['alt_vocals'])} alt"
         )
-        if not out:
-            return
-        base = out
-        for suf in (".android", ".ios"):
-            for ext in (".chart.gs6", ".gs6", ".zip"):
-                if base.lower().endswith(suf + ext):
-                    base = base[: -len(suf + ext)]
-        for ext in (".chart.gs6", ".gs6", ".zip"):
-            if base.lower().endswith(ext):
-                base = base[: -len(ext)]
-        for suf in (".android", ".ios"):
+    print(f"Identifier : {cfg['identifier']}")
+
+
+# --------------------------------------------------------------------------- #
+# Collect / validate (same checks as the GUI version, but returns errors)
+# --------------------------------------------------------------------------- #
+
+
+def collect(cfg: dict) -> tuple[dict | None, list[str]]:
+    errs: list[str] = []
+
+    def need(path, label):
+        if not path or not os.path.isfile(path):
+            errs.append(f"{label} is required (file not found).")
+            return False
+        return True
+
+    if need(cfg["jacket"], "Jacket"):
+        ok, msg = validate_image(cfg["jacket"])
+        if not ok:
+            errs.append(f"Jacket: {msg}")
+
+    ff = ffprobe_available()
+    if need(cfg["track"], "Audio track") and ff and not has_stream(cfg["track"], "audio"):
+        errs.append("Audio track has no audio stream.")
+    if need(cfg["track_pre"], "Preview audio") and ff:
+        dur = media_duration(cfg["track_pre"])
+        if dur is None:
+            errs.append("Preview audio: could not read duration.")
+        elif dur > MAX_PREVIEW_SECONDS + 0.05:
+            errs.append(f"Preview audio is {dur:.1f}s (max {MAX_PREVIEW_SECONDS:.0f}s).")
+
+    diffs = []
+    seen = set()
+    rows = [r for r in cfg["charts"] if (r.get("path") or "").strip()]
+    if not rows:
+        errs.append("At least one .sus chart is required.")
+    if len(rows) > MAX_CHARTS:
+        errs.append(f"At most {MAX_CHARTS} charts are allowed.")
+    for r in rows:
+        d = r.get("difficulty")
+        if d not in DIFFICULTIES:
+            errs.append(f"Unknown difficulty '{d}'.")
+            continue
+        if d in seen:
+            errs.append(f"Duplicate difficulty '{d}'.")
+        seen.add(d)
+        if not os.path.isfile(r["path"]):
+            errs.append(f"{d}: .sus file not found.")
+            continue
+        try:
+            lvl = int(r.get("level"))
+        except (TypeError, ValueError):
+            errs.append(f"{d}: level must be a number.")
+            continue
+        if not (MIN_LEVEL <= lvl <= MAX_LEVEL):
+            errs.append(f"{d}: level must be {MIN_LEVEL}-{MAX_LEVEL}.")
+        try:
+            with open(r["path"], "r", encoding="utf-8") as f:
+                text = f.read()
+        except Exception as e:
+            errs.append(f"{d}: cannot read .sus ({e}).")
+            continue
+        ok, msg = validate_sus_text(text)
+        if not ok:
+            errs.append(f"{d}: {msg}.")
+        try:
+            combo = sus_combo(r["path"])
+        except Exception as e:
+            errs.append(f"{d}: combo derivation failed ({e}).")
+            continue
+        diffs.append({"difficulty": d, "level": lvl, "notes": combo, "_path": r["path"]})
+
+    mvs = [m for m in cfg["mvs"] if (m.get("path") or "").strip()]
+    og_mv = next((m["path"] for m in mvs if m["kind"] == "ogmv"), None)
+    two_d_mv = next((m["path"] for m in mvs if m["kind"] == "2dmv"), None)
+    for label, p in (("ogmv", og_mv), ("2dmv", two_d_mv)):
+        if p:
+            if not os.path.isfile(p):
+                errs.append(f"{label}: file not found.")
+            elif ff and not has_stream(p, "video"):
+                errs.append(f"{label}: no video stream.")
+    kinds = [m["kind"] for m in mvs]
+    if kinds.count("ogmv") > 1:
+        errs.append("Only one 'ogmv' music video is allowed (ogmv/ogmv is unsupported).")
+    if kinds.count("2dmv") > 1:
+        errs.append("Only one '2dmv' music video is allowed (2dmv/2dmv is unsupported).")
+
+    for key, lab in [
+        ("title", "Title"),
+        ("charter", "Charter"),
+        ("lyricist", "Lyricist"),
+        ("composer", "Composer"),
+        ("arranger", "Arranger"),
+        ("artist", "Artist"),
+        ("vocals", "Vocals"),
+    ]:
+        if not str(cfg[key]).strip():
+            errs.append(f"{lab} is required.")
+
+    def as_int(key, label):
+        try:
+            return int(cfg[key])
+        except (TypeError, ValueError):
+            errs.append(f"{label} must be an integer.")
+            return 0
+
+    offset = as_int("offset_ms", "offset_ms")
+    mv_offset = as_int("mv_offset_ms", "additional_mv_offset_ms")
+
+    cover_files = []
+    alt_entries = []
+    alts = [
+        v
+        for v in cfg["alt_vocals"]
+        if (v.get("name") or "").strip()
+        or (v.get("audio") or "").strip()
+        or (v.get("vocals") or "").strip()
+    ]
+    if alts and not cfg["default_vocal"]["name"].strip():
+        errs.append("Default vocal name is required when alt vocals are present.")
+    for idx, v in enumerate(alts, start=1):
+        nm, vo = v["name"].strip(), v["vocals"].strip()
+        au, pv, jk = v["audio"].strip(), v["preview"].strip(), v["jacket"].strip()
+        if not nm:
+            errs.append(f"Alt vocal {idx}: name is required.")
+        if not vo:
+            errs.append(f"Alt vocal {idx}: vocals are required.")
+        if v.get("type") not in VOCAL_TYPES:
+            errs.append(f"Alt vocal {idx}: type must be one of {VOCAL_TYPES}.")
+        if not au or not os.path.isfile(au):
+            errs.append(f"Alt vocal {idx}: audio file is required.")
+        elif ff and not has_stream(au, "audio"):
+            errs.append(f"Alt vocal {idx}: audio has no audio stream.")
+        if not pv or not os.path.isfile(pv):
+            errs.append(f"Alt vocal {idx}: preview is required.")
+        elif ff:
+            d = media_duration(pv)
+            if d is not None and d > MAX_PREVIEW_SECONDS + 0.05:
+                errs.append(
+                    f"Alt vocal {idx}: preview is {d:.1f}s (max {MAX_PREVIEW_SECONDS:.0f}s)."
+                )
+        has_jacket = bool(jk)
+        if has_jacket:
+            if not os.path.isfile(jk):
+                errs.append(f"Alt vocal {idx}: jacket not found.")
+            else:
+                ok, msg = validate_image(jk)
+                if not ok:
+                    errs.append(f"Alt vocal {idx}: jacket {msg}")
+        alt_entries.append(
+            {
+                "id": idx,
+                "name": nm,
+                "vocals": vo,
+                "vocal_type": v.get("type", "original_song"),
+                "has_jacket": has_jacket,
+            }
+        )
+        if au:
+            cover_files.append((au, f"covers/cover_{idx}" + ext_of(au)))
+        if pv:
+            cover_files.append((pv, f"covers/cover_pre_{idx}" + ext_of(pv)))
+        if jk:
+            cover_files.append((jk, f"covers/cover_jacket_{idx}" + ext_of(jk)))
+
+    song_duration = None
+    if cfg["track"].strip() and ff:
+        song_duration = media_duration(cfg["track"])
+        if song_duration is not None:
+            song_duration = round(song_duration, 3)
+
+    if not validate_double_uuid(str(cfg["identifier"])):
+        errs.append("Identifier must be two valid v4 UUIDs joined by '_'.")
+
+    if errs:
+        return None, errs
+
+    def tr(v):
+        v = str(v).strip()
+        return {"jp": v, "en": v}
+
+    info = {
+        "identifier": cfg["identifier"].strip(),
+        "format_version": FORMAT_VERSION,
+        "title": tr(cfg["title"]),
+        "charter": cfg["charter"].strip(),
+        "difficulties": [
+            {"difficulty": d["difficulty"], "level": d["level"], "notes": d["notes"]}
+            for d in diffs
+        ],
+        "lyricist": tr(cfg["lyricist"]),
+        "composer": tr(cfg["composer"]),
+        "arranger": tr(cfg["arranger"]),
+        "artist": tr(cfg["artist"]),
+        "vocals": tr(cfg["vocals"]),
+        "isFullLength": bool(cfg["is_full"]),
+        "vocaloid_or_other": "other",
+        "offset_ms": offset,
+        "additional_mv_offset_ms": mv_offset,
+        "song_duration": song_duration,
+        "original": str(cfg["original"]).strip() or None,
+        "original_music_video": og_mv is not None,
+        "2d_music_video": two_d_mv is not None,
+    }
+    if str(cfg["collab"]).strip():
+        info["collab"] = tr(cfg["collab"])
+
+    if alt_entries:
+
+        def d2(s):
+            return {"jp": s, "en": s}
+
+        covers = [
+            {
+                "default": True,
+                "name": d2(cfg["default_vocal"]["name"].strip()),
+                "vocal_type": cfg["default_vocal"]["type"],
+            }
+        ]
+        for a in alt_entries:
+            covers.append(
+                {
+                    "default": False,
+                    "id": a["id"],
+                    "name": d2(a["name"]),
+                    "vocals": d2(a["vocals"]),
+                    "vocal_type": a["vocal_type"],
+                    "has_jacket": a["has_jacket"],
+                }
+            )
+        info["covers"] = covers
+
+    return {
+        "info": info,
+        "diffs": diffs,
+        "jacket": cfg["jacket"],
+        "track": cfg["track"],
+        "track_pre": cfg["track_pre"],
+        "ogmv": og_mv,
+        "2dmv": two_d_mv,
+        "cover_files": cover_files,
+    }, []
+
+
+def print_errors(errs: list[str]) -> None:
+    print("\nCannot build:")
+    for e in errs:
+        print(f"  * {e}")
+
+
+# --------------------------------------------------------------------------- #
+# Build / compile / import
+# --------------------------------------------------------------------------- #
+
+
+def write_zip(out: str, data: dict) -> None:
+    info = data["info"]
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("ChartInfo.json", json.dumps(info, ensure_ascii=False, indent=2))
+        z.write(data["jacket"], "jacket" + ext_of(data["jacket"]))
+        z.write(data["track"], "track" + ext_of(data["track"]))
+        z.write(data["track_pre"], "track_pre" + ext_of(data["track_pre"]))
+        for d in data["diffs"]:
+            z.write(d["_path"], f"{d['difficulty']}.sus")
+        if data["ogmv"]:
+            z.write(data["ogmv"], "mv" + ext_of(data["ogmv"]))
+        if data["2dmv"]:
+            z.write(data["2dmv"], "2dmv" + ext_of(data["2dmv"]))
+        for src, zip_name in data.get("cover_files", []):
+            z.write(src, zip_name)
+
+
+def default_base(data: dict) -> str:
+    t = data["info"]["title"]
+    return safe_name(t["en"] or t["jp"] or "custom_chart")
+
+
+def confirm_overwrite(path: str, assume_yes: bool) -> bool:
+    if not os.path.exists(path) or assume_yes:
+        return True
+    return ask_yn(f"{path} exists. Overwrite?", False)
+
+
+def do_build(data: dict, out: str, assume_yes: bool = False) -> bool:
+    if not out.lower().endswith(".zip"):
+        out += ".zip"
+    if not confirm_overwrite(out, assume_yes):
+        return False
+    try:
+        write_zip(out, data)
+    except Exception as e:
+        print(f"Build failed: {e}")
+        return False
+    print(f"Built: {out}\nKeep the ZIP for when you want to update the chart.")
+    return True
+
+
+def strip_compile_suffixes(base: str) -> str:
+    changed = True
+    while changed:
+        changed = False
+        for suf in (".chart.gs6", ".gs6", ".zip", ".android", ".ios"):
             if base.lower().endswith(suf):
                 base = base[: -len(suf)]
-        self._run_compile(data, bases, base)
+                changed = True
+    return base
 
-    def _run_compile(self, data: dict, bases: str, out: str):
-        import threading
 
+def do_compile(data: dict, out_base: str, assume_yes: bool = False) -> bool:
+    try:
         import encode
-
-        self.status.set("Compiling .chart.gs6, this can take a minute...")
-        self.config(cursor="watch")
-
-        def worker():
-            try:
-                outputs = encode.compile_chart(
-                    data, bases, out, log=lambda m: self.after(0, self.status.set, m)
-                )
-            except Exception as e:
-                import traceback
-
-                tb = traceback.format_exc()
-                self.after(0, self._compile_failed, str(e), tb)
-                return
-            self.after(0, self._compile_done, outputs, data["info"]["identifier"])
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _compile_done(self, outputs: list[str], identifier: str):
-        self.config(cursor="")
-        self.status.set("Compiled " + ", ".join(os.path.basename(o) for o in outputs))
-        messagebox.showinfo(
-            "Done",
-            "Compiled (one encrypted bundle set per platform):\n"
-            + "\n".join(outputs)
-            + f"\n\nIdentifier (save this to update the chart later):\n{identifier}",
+    except Exception as e:
+        print(
+            f"Compiler unavailable: could not load encode.py:\n  {e}\n"
+            "The .chart.gs6 compiler needs cricodecs, UnityPy, Pillow and ffmpeg "
+            "(see requirements.txt) plus the base bundles in the bases folder."
         )
+        return False
+    bases = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bases")
+    missing = encode.missing_bases(bases, want_mv=(data["ogmv"] or data["2dmv"]))
+    if missing:
+        print("Missing base bundles in the bases folder:")
+        for m in missing:
+            print(f"  * {m}")
+        return False
+    base = strip_compile_suffixes(out_base)
+    targets = [f"{base}.android.chart.gs6", f"{base}.ios.chart.gs6"]
+    for t in targets:
+        if not confirm_overwrite(t, assume_yes):
+            return False
+    print("Compiling .chart.gs6, this can take a minute...")
+    try:
+        outputs = encode.compile_chart(data, bases, base, log=lambda m: print(f"  {m}"))
+    except Exception:
+        import traceback
 
-    def _compile_failed(self, msg: str, tb: str):
-        self.config(cursor="")
-        self.status.set(f"Compile failed: {msg}")
-        messagebox.showerror("Compile failed", f"{msg}\n\n{tb}")
+        print("Compile failed:\n" + traceback.format_exc())
+        return False
+    print("Compiled (one encrypted bundle set per platform):")
+    for o in outputs:
+        print(f"  {o}")
+    print(f"\nIdentifier (save this to update the chart later):\n  {data['info']['identifier']}")
+    return True
+
+
+_IMPORT_DIRS: list[str] = []
+
+
+def _cleanup_imports() -> None:
+    for d in _IMPORT_DIRS:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+atexit.register(_cleanup_imports)
+
+
+def load_from_zip(path: str) -> dict:
+    tmp = tempfile.mkdtemp(prefix="gs6chart_")
+    _IMPORT_DIRS.append(tmp)
+    root = os.path.realpath(tmp)
+    with zipfile.ZipFile(path) as z:
+        for member in z.namelist():  # refuse path traversal
+            dest = os.path.realpath(os.path.join(root, member))
+            if dest != root and not dest.startswith(root + os.sep):
+                raise ValueError(f"unsafe path in zip: {member}")
+        z.extractall(root)
+    info_path = ""
+    for r, _d, files in sorted(os.walk(root), key=lambda t: t[0].count(os.sep)):
+        if "ChartInfo.json" in files:
+            info_path = os.path.join(r, "ChartInfo.json")
+            break
+    if not info_path:
+        return _load_unch(root)
+    with open(info_path, "r", encoding="utf-8") as f:
+        info = json.load(f)
+
+    def find(stem: str) -> str:
+        for r, _d, files in os.walk(root):
+            for fn in files:
+                if os.path.splitext(fn)[0] == stem:
+                    return os.path.join(r, fn)
+        return ""
+
+    def one(v) -> str:
+        if isinstance(v, dict):
+            return v.get("en") or v.get("jp") or ""
+        return v or ""
+
+    cfg = new_cfg()
+    cfg["jacket"] = find("jacket")
+    cfg["track"] = find("track")
+    cfg["track_pre"] = find("track_pre")
+    if find("mv"):
+        cfg["mvs"].append({"kind": "ogmv", "path": find("mv")})
+    if find("2dmv"):
+        cfg["mvs"].append({"kind": "2dmv", "path": find("2dmv")})
+    for d in info.get("difficulties", []):
+        diff = d.get("difficulty", "expert")
+        cfg["charts"].append(
+            {"difficulty": diff, "level": int(d.get("level", 1)), "path": find(diff)}
+        )
+    cfg["title"] = one(info.get("title"))
+    cfg["charter"] = info.get("charter", "") or ""
+    for k in ("lyricist", "composer", "arranger", "artist", "vocals", "collab"):
+        cfg[k] = one(info.get(k))
+    cfg["is_full"] = bool(info.get("isFullLength", True))
+    cfg["offset_ms"] = int(info.get("offset_ms", 0))
+    cfg["mv_offset_ms"] = int(info.get("additional_mv_offset_ms", 0))
+    cfg["original"] = info.get("original") or ""
+    if info.get("identifier"):
+        cfg["identifier"] = info["identifier"]
+    for c in info.get("covers", []):
+        if c.get("default"):
+            cfg["default_vocal"] = {
+                "name": one(c.get("name")),
+                "type": c.get("vocal_type", "sekai"),
+            }
+        else:
+            cid = c.get("id")
+            cfg["alt_vocals"].append(
+                {
+                    "name": one(c.get("name")),
+                    "vocals": one(c.get("vocals")),
+                    "type": c.get("vocal_type", "original_song"),
+                    "audio": find(f"cover_{cid}"),
+                    "preview": find(f"cover_pre_{cid}"),
+                    "jacket": find(f"cover_jacket_{cid}"),
+                }
+            )
+    return cfg
+
+
+def _load_unch(root: str) -> dict:
+    """Fallback: the zip is an UntitledCharts export (level.json + NSLevelData.json.gz)."""
+    try:
+        import unch
+    except ImportError as e:
+        raise ValueError(f"ChartInfo.json not found, and unch.py could not be loaded ({e}).")
+    if not unch.find_unch(root):
+        raise ValueError(
+            "no ChartInfo.json found, and it is not an UntitledCharts export "
+            "(level.json + NSLevelData.json.gz) either."
+        )
+    try:
+        cfg = unch.build_cfg(root, os.path.join(root, "_converted"))
+    except unch.UnchError as e:
+        raise ValueError(str(e))
+    meta = cfg.pop("_unch")
+    for c, want in zip(cfg["charts"], meta["expected_combos"]):
+        # independent check: every converted chart must keep every note
+        got = sus_combo(c["path"])
+        if got != want:
+            raise ValueError(
+                f"conversion check failed for {c['difficulty']}: converted chart has "
+                f"combo {got}, the source data has {want}. Refusing to build."
+            )
+    n = len(cfg["charts"])
+    print(
+        f"Detected UntitledCharts export: {cfg['title']} - {cfg['artist']}\n"
+        f"  {n} chart{'s' if n != 1 else ''} found:"
+    )
+    for c, want in zip(cfg["charts"], meta["expected_combos"]):
+        print(f"    {c['difficulty']:<7} Lv{c['level']:<3} combo {want} (verified)")
+    print(f"  music offset {meta['bgm_offset']:+.3f}s -> offset_ms={cfg['offset_ms']}")
+    for w in meta["warnings"]:
+        print(f"  ! {w}")
+    if meta["ignored"]:
+        print(f"  not used by the game mod: {', '.join(meta['ignored'])}")
+    print(
+        "  lyricist/composer/arranger are not in UnCh data; set them with "
+        "--set composer=... if you want them filled in."
+    )
+    return cfg
+
+
+_STR_KEYS = {
+    "title", "charter", "lyricist", "composer", "arranger",
+    "artist", "vocals", "collab", "original", "identifier",
+}
+_INT_KEYS = {"offset_ms", "mv_offset_ms"}
+
+
+def apply_overrides(cfg: dict, sets: list[str]) -> None:
+    for item in sets or []:
+        if "=" not in item:
+            raise ValueError(f"--set expects KEY=VALUE, got '{item}'")
+        k, v = item.split("=", 1)
+        k, v = k.strip().lower().replace("-", "_"), v.strip()
+        if k in _STR_KEYS:
+            cfg[k] = v
+        elif k in _INT_KEYS:
+            try:
+                cfg[k] = int(v)
+            except ValueError:
+                raise ValueError(f"{k} must be an integer")
+        elif k == "is_full":
+            cfg[k] = v.lower() in ("1", "true", "yes", "y")
+        elif k in ("level", "difficulty"):
+            if len(cfg["charts"]) != 1:
+                raise ValueError(f"--set {k} only works when there is exactly one chart")
+            if k == "level":
+                lvl = int(v)
+                if not (MIN_LEVEL <= lvl <= MAX_LEVEL):
+                    raise ValueError(f"level must be {MIN_LEVEL}-{MAX_LEVEL}")
+                cfg["charts"][0]["level"] = lvl
+            else:
+                if v.lower() not in DIFFICULTIES:
+                    raise ValueError(f"difficulty must be one of {DIFFICULTIES}")
+                cfg["charts"][0]["difficulty"] = v.lower()
+        else:
+            raise ValueError(
+                f"unknown key '{k}' (try: {', '.join(sorted(_STR_KEYS | _INT_KEYS | {'is_full', 'level', 'difficulty'}))})"
+            )
+
+
+# --------------------------------------------------------------------------- #
+# Interactive driver
+# --------------------------------------------------------------------------- #
+
+
+def menu(cfg: dict, assume_yes: bool) -> None:
+    while True:
+        print(
+            "\n--- Menu ---------------------------------------------------\n"
+            "  b  Build .zip                 1  Edit files\n"
+            "  c  Compile .chart.gs6         2  Edit charts\n"
+            "  j  Save config as JSON        3  Edit metadata\n"
+            "  v  View summary               4  Edit vocals\n"
+            "  q  Quit                       5  Edit identity"
+        )
+        choice = _input("> ").strip().lower()
+        if choice in ("q", "quit", "exit"):
+            return
+        if choice == "1":
+            edit_files(cfg)
+        elif choice == "2":
+            edit_charts(cfg)
+        elif choice == "3":
+            edit_metadata(cfg)
+        elif choice == "4":
+            edit_vocals(cfg)
+        elif choice == "5":
+            edit_identity(cfg)
+        elif choice == "v":
+            show_summary(cfg)
+        elif choice == "j":
+            default = (safe_name(cfg["title"]) if cfg["title"] else "chart") + ".json"
+            out = ask("Save config to", default)
+            if confirm_overwrite(out, assume_yes):
+                save_config(cfg, out)
+                print(f"Saved {out}")
+                if any(
+                    d and any(str(v).startswith(d) for v in (cfg["jacket"], cfg["track"]))
+                    for d in _IMPORT_DIRS
+                ):
+                    print(
+                        "  note: paths point at a temporary folder from --import; "
+                        "they vanish when this program exits."
+                    )
+        elif choice in ("b", "c"):
+            data, errs = collect(cfg)
+            if errs:
+                print_errors(errs)
+                continue
+            base = default_base(data)
+            if choice == "b":
+                out = ask("Output .zip path", os.path.join(os.getcwd(), base + ".zip"))
+                do_build(data, out, assume_yes)
+            else:
+                out = ask(
+                    "Output base name (writes .android.chart.gs6 and .ios.chart.gs6)",
+                    os.path.join(os.getcwd(), base),
+                )
+                do_compile(data, out, assume_yes)
+        else:
+            print("  ! unknown option.")
+
+
+def wizard(cfg: dict) -> None:
+    edit_files(cfg)
+    edit_charts(cfg)
+    edit_metadata(cfg)
+    edit_vocals(cfg)
+    edit_identity(cfg)
+    show_summary(cfg)
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        description="GridlessSekai6 Custom Chart Builder (terminal edition)"
+    )
+    ap.add_argument(
+        "zips",
+        nargs="*",
+        metavar="CHART.zip",
+        help="chart zip(s) containing ChartInfo.json: auto-validate and compile, no prompts",
+    )
+    ap.add_argument("--config", metavar="FILE", help="load a JSON config")
+    ap.add_argument("--import", dest="import_zip", metavar="ZIP", help="load a built chart .zip")
+    ap.add_argument("--zip", metavar="OUT.zip", help="build a chart zip and exit")
+    ap.add_argument(
+        "--compile",
+        metavar="OUT_BASE",
+        help="compile .android/.ios .chart.gs6 files and exit",
+    )
+    ap.add_argument("--save-config", metavar="FILE", help="write the loaded config to FILE")
+    ap.add_argument("--template", action="store_true", help="print a config template and exit")
+    ap.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="override a field, e.g. --set composer=Name --set offset_ms=300 (repeatable)",
+    )
+    ap.add_argument("-y", "--yes", action="store_true", help="overwrite files without asking")
+    args = ap.parse_args(argv)
+
+    if args.template:
+        print(json.dumps(template_cfg(), ensure_ascii=False, indent=2))
+        return 0
+
+    if args.zips:
+        if args.config or args.import_zip or args.zip or args.compile:
+            ap.error("a bare CHART.zip can't be combined with --config/--import/--zip/--compile")
+        failed = 0
+        for zp in args.zips:
+            zp = clean_path(zp)
+            print(f"\n##### {zp}")
+            try:
+                cfg = load_from_zip(zp)
+            except (OSError, ValueError, zipfile.BadZipFile, json.JSONDecodeError) as e:
+                print(f"Load failed: {e}", file=sys.stderr)
+                failed += 1
+                continue
+            try:
+                apply_overrides(cfg, args.set)
+            except ValueError as e:
+                print(f"--set failed: {e}", file=sys.stderr)
+                return 2
+            data, errs = collect(cfg)
+            if errs:
+                print_errors(errs)
+                failed += 1
+                continue
+            out_base = os.path.splitext(os.path.abspath(zp))[0]
+            if not do_compile(data, out_base, assume_yes=True):
+                failed += 1
+        print(f"\nDone: {len(args.zips) - failed} ok, {failed} failed.")
+        return 1 if failed else 0
+    if args.config and args.import_zip:
+        ap.error("use either --config or --import, not both")
+
+    try:
+        if args.config:
+            cfg = load_config(args.config)
+        elif args.import_zip:
+            cfg = load_from_zip(args.import_zip)
+            print(f"Imported {os.path.basename(args.import_zip)}.")
+        else:
+            cfg = None
+    except (OSError, ValueError, zipfile.BadZipFile, json.JSONDecodeError) as e:
+        print(f"Load failed: {e}", file=sys.stderr)
+        return 1
+
+    if cfg is not None and args.set:
+        try:
+            apply_overrides(cfg, args.set)
+        except ValueError as e:
+            print(f"--set failed: {e}", file=sys.stderr)
+            return 2
+
+    batch = bool(args.zip or args.compile or args.save_config)
+
+    if batch:
+        if cfg is None:
+            print("--zip/--compile/--save-config need --config or --import.", file=sys.stderr)
+            return 2
+        ok = True
+        if args.save_config:
+            save_config(cfg, args.save_config)
+            print(f"Saved {args.save_config}")
+        if args.zip or args.compile:
+            data, errs = collect(cfg)
+            if errs:
+                print_errors(errs)
+                return 1
+            if args.zip:
+                ok = do_build(data, args.zip, assume_yes=True) and ok
+            if args.compile:
+                ok = do_compile(data, args.compile, assume_yes=True) and ok
+        return 0 if ok else 1
+
+    print("GridlessSekai6 Custom Chart Builder (terminal)")
+    print("Enter keeps the [default]; '-' clears an optional field; Ctrl+C quits.")
+    if not ffprobe_available():
+        print("WARNING: ffprobe not found on PATH. Audio/preview checks disabled.")
+    try:
+        if cfg is None:
+            cfg = new_cfg()
+            wizard(cfg)
+        else:
+            show_summary(cfg)
+        menu(cfg, args.yes)
+    except (Abort, KeyboardInterrupt):
+        print("\nAborted.")
+        return 130
+    return 0
 
 
 if __name__ == "__main__":
-    App().mainloop()
+    sys.exit(main())
