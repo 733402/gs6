@@ -315,6 +315,20 @@ def level_data_to_score(level: dict):
     return Score(metadata=meta, notes=notes)
 
 
+def expected_counts(level: dict) -> tuple[int, int]:
+    """(core, total) straight from the raw entities.
+    core  = taps/flicks/traces + slide heads + slide tails (notes that must survive
+            conversion exactly).
+    total = core + visible slide ticks + the editor's hidden slide ticks (those are
+            derived data: never written to the .sus, regenerated when it is read)."""
+    core = 0
+    for r in level.get("entities", []):
+        a = r["archetype"]
+        if _SINGLE.match(a) or _HEAD.match(a) or _TAIL.match(a):
+            core += 1
+    return core, expected_combo(level)
+
+
 def expected_combo(level: dict) -> int:
     """Combo straight from the raw entities, as an independent cross-check."""
     n = 0
@@ -360,7 +374,11 @@ def find_all_unch(root: str) -> list[tuple[str, str, str]]:
     for r, _d, files in os.walk(root):
         low = {fn.lower(): fn for fn in files}
         lj = low.get("level.json")
-        data = low.get("nsleveldata.json.gz") or low.get("nsleveldata.json")
+        data = (
+            low.get("nsleveldata.json.gz")
+            or low.get("nsleveldata.json")
+            or low.get("chcyleveldata.json.gz")
+        )
         if lj and data:
             out.append((r, os.path.join(r, lj), os.path.join(r, data)))
     out.sort(key=lambda t: t[0])
@@ -371,6 +389,20 @@ def find_unch(root: str) -> tuple[str, str] | None:
     """Return (level.json path, level data path) of the first UnCh export under `root`."""
     found = find_all_unch(root)
     return (found[0][1], found[0][2]) if found else None
+
+
+def _is_chcy(data_path: str) -> bool:
+    return os.path.basename(data_path).lower().startswith("chcy")
+
+
+def _score_from_chcy(sc, data_path: str):
+    """Chart Cyanvas LevelData -> (Score, bgm_offset_seconds)."""
+    try:
+        with open(data_path, "rb") as f:
+            score = sc.LevelData.chart_cyanvas.load(f)
+    except Exception as ex:
+        raise UnchError(f"could not read the Chart Cyanvas data ({ex})")
+    return score, float(getattr(score.metadata, "waveoffset", 0.0) or 0.0)
 
 
 def _difficulty_of(meta: dict) -> str:
@@ -446,19 +478,28 @@ def build_cfg(root: str, work_dir: str) -> dict:
 
     # ---- convert each chart -------------------------------------------------
     os.makedirs(work_dir, exist_ok=True)
-    charts, combos, offsets = [], [], []
+    charts, combos, cores, offsets = [], [], [], []
     for e in chosen:
-        level = read_level_data(e["data_path"])
-        score = level_data_to_score(level)
-        bgm_offset = float(level.get("bgmOffset", 0.0) or 0.0)
+        if _is_chcy(e["data_path"]):
+            score, bgm_offset = _score_from_chcy(sc, e["data_path"])
+            want_total = want_core = None  # different raw format: no independent count
+        else:
+            level = read_level_data(e["data_path"])
+            score = level_data_to_score(level)
+            bgm_offset = float(level.get("bgmOffset", 0.0) or 0.0)
+            want_core, want_total = expected_counts(level)
         score.metadata.waveoffset = 0.0  # applied to the audio via offset_ms instead
         sus_path = os.path.join(work_dir, f"{e['diff']}.sus")
         try:
             sc.sus.export(sus_path, score)
         except Exception:
-            sc.sus.export(sus_path, score, allow_layers=True)
+            try:
+                sc.sus.export(sus_path, score, allow_layers=True)
+            except Exception as ex:
+                raise UnchError(f"could not write the {e['diff']} chart as .sus ({ex})")
         charts.append({"difficulty": e["diff"], "level": e["rating"], "path": sus_path})
-        combos.append(expected_combo(level))
+        cores.append(want_core)
+        combos.append(want_total)
         offsets.append(bgm_offset)
 
     # ---- one music offset for the whole song --------------------------------
@@ -538,6 +579,7 @@ def build_cfg(root: str, work_dir: str) -> dict:
         "_unch": {
             "source_id": seed,
             "expected_combos": combos,  # aligned with cfg["charts"]
+            "expected_cores": cores,  # same order: notes that must match exactly
             "bgm_offset": bgm_offset,
             "ignored": ignored,
             "warnings": warnings,
