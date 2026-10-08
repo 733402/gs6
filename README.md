@@ -21,4 +21,13 @@ run
 python main.py chart.zip
 replace chart with the zip name of ur chart so like clover.zip 
 
-NOTE there is NO MV support if you want to add a MV please use the original repository 
+MV support is here
+to simply add mv make sure you have a folder called ogmv or 2dmv you can add ogmv or 2dmv or both 
+for mv to work
+chart.zip must be like this
+chart folder
+2dmv
+ogmv
+
+and you must have a mp4 file in 2dmv/ogmv
+then zip the chart file
