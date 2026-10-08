@@ -11,6 +11,15 @@ Easiest (no prompts): hand it a chart zip and it does everything
                                          merged into ONE multi-difficulty chart.
     python main.py x.zip --set composer="Name" --set offset_ms=300   override fields
 
+Search / download online, then convert straight to .gs6:
+    python main.py --search "daisuki"    search UntitledCharts, Next SEKAI, Chart Cyanvas
+                                         and official songs, pick a number, done
+    python main.py --search "x" --source unch     only one source (unch ns chcy chcy-o pjsk)
+    python main.py UnCh-xxxxxxxx...      a chart id or link downloads + converts directly
+                                         (also coconut-next-sekai-N, chcy-..., or a sekai.best song id)
+    python main.py some_folder           a downloaded/extracted chart folder works too
+    (files go to ./out: downloads in out/downloads, .gs6 files next to them; --out DIR to change)
+
 Interactive:
     python main.py                       step-by-step wizard, then a menu
     python main.py --import chart.zip    load a previously built zip, then menu
@@ -104,6 +113,21 @@ def has_stream(path: str, kind: str) -> bool:
     return cp.returncode == 0 and kind in cp.stdout
 
 
+def trim_audio(src: str, dst: str, seconds: float, fade: float = 2.0) -> bool:
+    """Write the first `seconds` of `src` to `dst` (mp3) with a short fade-out."""
+    try:
+        cp = _run(
+            [
+                "ffmpeg", "-y", "-v", "error", "-i", src, "-t", f"{seconds:.3f}",
+                "-af", f"afade=t=out:st={max(0.0, seconds - fade):.3f}:d={fade:.3f}",
+                "-vn", "-c:a", "libmp3lame", "-q:a", "2", dst,
+            ]
+        )
+    except FileNotFoundError:
+        return False
+    return cp.returncode == 0 and os.path.isfile(dst)
+
+
 def validate_image(path: str) -> tuple[bool, str]:
     try:
         from PIL import Image
@@ -139,6 +163,31 @@ def sus_combo(path: str) -> int:
     with open(path, "r", encoding="utf-8") as f:
         score = sonolus_converters.sus.load(f)
     return int(score.combo_count)
+
+
+def sus_core_combo(path: str) -> int | None:
+    """Taps/flicks/traces + judged slide heads/tails read back from a .sus file
+    (no slide ticks, so no derived/hidden ticks). None if the library objects
+    don't look as expected."""
+    import sonolus_converters
+
+    with open(path, "r", encoding="utf-8") as f:
+        score = sonolus_converters.sus.load(f)
+    n = singles = 0
+    for note in score.notes:
+        kind = type(note).__name__
+        if kind == "Single":
+            singles += 1
+            if getattr(note, "type", "single") != "damage":
+                n += 1
+        elif kind == "Slide":
+            for c in note.connections:
+                ck = type(c).__name__
+                if ck in ("SlideStartPoint", "SlideEndPoint") and getattr(
+                    c, "judgeType", "normal"
+                ) != "none":
+                    n += 1
+    return n if singles else None
 
 
 def gen_double_uuid() -> str:
@@ -963,13 +1012,20 @@ def load_from_zip(path: str) -> dict:
             if dest != root and not dest.startswith(root + os.sep):
                 raise ValueError(f"unsafe path in zip: {member}")
         z.extractall(root)
+    return load_from_dir(root)
+
+
+def load_from_dir(root: str) -> dict:
+    """Load a chart from a folder: a built chart (ChartInfo.json), an UntitledCharts /
+    Next SEKAI / Chart Cyanvas export, or an official-chart download."""
+    root = os.path.realpath(root)
     info_path = ""
     for r, _d, files in sorted(os.walk(root), key=lambda t: t[0].count(os.sep)):
         if "ChartInfo.json" in files:
             info_path = os.path.join(r, "ChartInfo.json")
             break
     if not info_path:
-        return _load_unch(root)
+        return _load_pjsk(root) if _find_pjsk_meta(root) else _load_unch(root)
     with open(info_path, "r", encoding="utf-8") as f:
         info = json.load(f)
 
@@ -1029,6 +1085,117 @@ def load_from_zip(path: str) -> dict:
     return cfg
 
 
+def _fit_preview(cfg: dict, warnings: list[str]) -> None:
+    """Trim the preview to the allowed length (first 44.5s + fade-out) when needed."""
+    if not (cfg.get("track_pre") and ffprobe_available()):
+        return
+    d = media_duration(cfg["track_pre"])
+    if d is None or d <= MAX_PREVIEW_SECONDS + 0.05:
+        return
+    out = os.path.join(os.path.dirname(cfg["track_pre"]), "preview_trimmed.mp3")
+    if trim_audio(cfg["track_pre"], out, MAX_PREVIEW_SECONDS - 0.5):
+        warnings.append(
+            f"preview was {d:.1f}s (max {MAX_PREVIEW_SECONDS:.0f}s): used its "
+            f"first {MAX_PREVIEW_SECONDS - 0.5:.1f}s with a short fade-out"
+        )
+        cfg["track_pre"] = out
+    else:
+        warnings.append(
+            f"preview is {d:.1f}s (max {MAX_PREVIEW_SECONDS:.0f}s) and could not "
+            "be trimmed automatically (is ffmpeg on PATH?)"
+        )
+
+
+def _find_pjsk_meta(root: str) -> tuple[str, dict] | None:
+    """(folder, level.json) of an official-chart download made by fetch.py."""
+    for r, _d, files in os.walk(root):
+        if "level.json" not in files:
+            continue
+        try:
+            with open(os.path.join(r, "level.json"), "r", encoding="utf-8") as f:
+                meta = json.load(f)
+        except (OSError, ValueError):
+            continue
+        g = meta.get("_gs6") if isinstance(meta, dict) else None
+        if isinstance(g, dict) and g.get("source") == "pjsk":
+            return r, meta
+    return None
+
+
+def _load_pjsk(root: str) -> dict:
+    """An official game chart downloaded from sekai.best (one .sus per difficulty)."""
+    found = _find_pjsk_meta(root)
+    if not found:
+        raise ValueError("not an official-chart download (level.json with a _gs6 block missing).")
+    r, meta = found
+    g = meta["_gs6"]
+    order = {d: i for i, d in enumerate(DIFFICULTIES)}
+    cfg = new_cfg()
+    warnings: list[str] = []
+    combos: list = []
+    for d in sorted(g.get("difficulties", []), key=lambda d: order.get(d.get("musicDifficulty"), 99)):
+        name = d.get("musicDifficulty")
+        path = os.path.join(r, f"{name}.sus")
+        if name not in order or not os.path.isfile(path):
+            continue
+        lvl = max(MIN_LEVEL, min(MAX_LEVEL, int(d.get("playLevel") or 1)))
+        cfg["charts"].append({"difficulty": name, "level": lvl, "path": path})
+        want = d.get("totalNoteCount")
+        try:
+            got = sus_combo(path)
+        except Exception:
+            got = None
+        combos.append(got)
+        if want and got is not None and got != want:
+            warnings.append(f"{name}: combo {got} here vs {want} in the game data")
+    if not cfg["charts"]:
+        raise ValueError("no chart files found in the download.")
+    for key, fname in (("jacket", "jacket.png"), ("track", "music.mp3"), ("track_pre", "preview.mp3")):
+        p = os.path.join(r, fname)
+        if not os.path.isfile(p):
+            raise ValueError(f"{fname} is missing from the download.")
+        cfg[key] = p
+
+    def txt(k: str) -> str:
+        v = str(meta.get(k) or "").strip()
+        return v if v else "-"
+
+    cfg["title"] = txt("title")
+    cfg["composer"], cfg["lyricist"], cfg["arranger"] = txt("composer"), txt("lyricist"), txt("arranger")
+    cfg["artist"] = cfg["composer"]
+    cfg["vocals"] = str(g.get("vocals") or "").strip() or "-"
+    cfg["charter"] = "SEGA"
+    cfg["is_full"] = True
+    cfg["identifier"] = _stable_identifier(f"pjsk:{g.get('region')}:{meta.get('id')}:{g.get('vocal_id')}")
+    _fit_preview(cfg, warnings)
+
+    n = len(cfg["charts"])
+    print(
+        f"Detected official chart: {cfg['title']} - {cfg['artist']}  "
+        f"[{g.get('region')}, {g.get('vocal_caption') or 'vocal version'}]\n"
+        f"  {n} chart{'s' if n != 1 else ''}:"
+    )
+    for c, got in zip(cfg["charts"], combos):
+        print(f"    {c['difficulty']:<7} Lv{c['level']:<3} combo {got}")
+    for w in warnings:
+        print(f"  ! {w}")
+    print(
+        "  music offset 0 ms (official audio); charter is set to SEGA. Change anything "
+        "with --set, e.g. --set offset_ms=300"
+    )
+    return cfg
+
+
+def _stable_identifier(seed: str) -> str:
+    import hashlib
+
+    def one(tag: str) -> str:
+        h = hashlib.sha256(f"gs6:{seed}:{tag}".encode("utf-8")).digest()[:16]
+        return str(uuid.UUID(bytes=h, version=4))
+
+    return f"{one('a')}_{one('b')}"
+
+
 def _load_unch(root: str) -> dict:
     """Fallback: the zip is an UntitledCharts export (level.json + NSLevelData.json.gz)."""
     try:
@@ -1045,21 +1212,58 @@ def _load_unch(root: str) -> dict:
     except unch.UnchError as e:
         raise ValueError(str(e))
     meta = cfg.pop("_unch")
-    for c, want in zip(cfg["charts"], meta["expected_combos"]):
-        # independent check: every converted chart must keep every note
+    notes_info = []
+    for c, want, want_core in zip(
+        cfg["charts"], meta["expected_combos"], meta["expected_cores"]
+    ):
+        # independent check of the round trip (.sus written, then read back)
         got = sus_combo(c["path"])
-        if got != want:
+        if want is None:  # e.g. Chart Cyanvas: no raw count to compare against
+            notes_info.append((got, None, False))
+            continue
+        try:
+            got_core = sus_core_combo(c["path"])
+        except Exception:
+            got_core = None
+        if got_core is not None and got_core != want_core:
+            raise ValueError(
+                f"conversion check failed for {c['difficulty']}: {got_core} real "
+                f"notes after conversion, the source data has {want_core}. "
+                "Refusing to build."
+            )
+        diff = got - want
+        if got_core is None and abs(diff) > 3:
             raise ValueError(
                 f"conversion check failed for {c['difficulty']}: converted chart has "
                 f"combo {got}, the source data has {want}. Refusing to build."
             )
+        notes_info.append((got, diff, got_core is not None))
+    _fit_preview(cfg, meta["warnings"])
     n = len(cfg["charts"])
     print(
-        f"Detected UntitledCharts export: {cfg['title']} - {cfg['artist']}\n"
+        f"Detected chart export: {cfg['title']} - {cfg['artist']}\n"
         f"  {n} chart{'s' if n != 1 else ''} found:"
     )
-    for c, want in zip(cfg["charts"], meta["expected_combos"]):
-        print(f"    {c['difficulty']:<7} Lv{c['level']:<3} combo {want} (verified)")
+    for c, want, (got, diff, core_ok) in zip(
+        cfg["charts"], meta["expected_combos"], notes_info
+    ):
+        line = f"    {c['difficulty']:<7} Lv{c['level']:<3} combo {got}"
+        if diff is None:
+            line += " (converted; this source format has no independent note count)"
+        elif diff == 0:
+            line += " (verified)"
+        else:
+            line += f" (verified; {diff:+d} vs editor's {want}, see below)"
+        print(line)
+        if diff:
+            meta["warnings"].append(
+                f"{c['difficulty']}: slide tick count differs by {diff:+d} from the "
+                "editor's. Ticks are regenerated by the converter library and are "
+                "not stored in the .sus; every tap, flick, trace and slide "
+                "head/tail matched exactly."
+                if core_ok
+                else f"{c['difficulty']}: combo differs by {diff:+d} (small, accepted)."
+            )
     print(f"  music offset {meta['bgm_offset']:+.3f}s -> offset_ms={cfg['offset_ms']}")
     for w in meta["warnings"]:
         print(f"  ! {w}")
@@ -1184,6 +1388,135 @@ def wizard(cfg: dict) -> None:
     show_summary(cfg)
 
 
+def _choose_vocal(descs: list[str]) -> int:
+    print("\nThis song has several vocal versions:")
+    for i, d in enumerate(descs, 1):
+        print(f"  {i}. {d}")
+    return ask_int("Which one", default=1, lo=1, hi=len(descs)) - 1
+
+
+def _out_name(cfg: dict) -> str:
+    name = safe_name(cfg["title"])
+    if len(cfg["charts"]) == 1:
+        name += f" ({cfg['charts'][0]['difficulty']})"
+    return name
+
+
+def build_from_folder(folder: str, args, out_dir: str | None = None) -> bool:
+    """Load a chart folder, apply --set overrides, validate and compile .gs6 files."""
+    try:
+        cfg = load_from_dir(folder)
+        apply_overrides(cfg, args.set)
+    except (OSError, ValueError, json.JSONDecodeError) as e:
+        print(f"Load failed: {e}", file=sys.stderr)
+        return False
+    data, errs = collect(cfg)
+    if errs:
+        print_errors(errs)
+        return False
+    out_dir = out_dir or args.out
+    os.makedirs(out_dir, exist_ok=True)
+    return do_compile(data, os.path.join(out_dir, _out_name(cfg)), assume_yes=args.yes)
+
+
+def get_and_build(source: str, ident: str, args) -> bool:
+    """Download one chart from an online source and convert it to .gs6."""
+    import fetch
+
+    region = "auto" if args.region == "all" else args.region
+    print(f"\nDownloading from {fetch.LABELS[source]}: {ident}")
+    try:
+        folder = fetch.download(
+            source,
+            ident,
+            os.path.join(args.out, "downloads"),
+            region=region,
+            cover=args.cover,
+            choose=_choose_vocal if sys.stdin.isatty() else None,
+            log=print,
+        )
+    except fetch.NotFound:
+        print(f"Not found: {ident} (check the id, or try --source).", file=sys.stderr)
+        return False
+    except fetch.FetchError as e:
+        print(f"Download failed: {e}", file=sys.stderr)
+        return False
+    print(f"Saved to {folder}")
+    return build_from_folder(folder, args)
+
+
+def cmd_search(args) -> int:
+    import fetch
+
+    sources = list(fetch.SOURCES) if args.source == "all" else [args.source]
+    regions = tuple(fetch.REGIONS) if args.region == "all" else (
+        ("jp", "en") if args.region == "auto" else (args.region,)
+    )
+    query = args.search or ""
+    page = max(0, args.page - 1)
+    interactive = sys.stdin.isatty()
+    while True:
+        results: list[dict] = []
+        more = False
+        for s in sources:
+            print(f"Searching {fetch.LABELS[s]}...")
+            try:
+                rs, nxt = fetch.search(s, query, page, regions)
+            except fetch.FetchError as e:
+                print(f"  ! {fetch.LABELS[s]}: {e}")
+                continue
+            results += rs
+            more = more or nxt
+        print()
+        if results:
+            print(f"Results for '{query}' (page {page + 1}):" if query else f"Newest charts (page {page + 1}):")
+            for i, r in enumerate(results, 1):
+                print(fetch.format_result(i, r))
+        else:
+            print("No results." if query else "Nothing listed.")
+        if not interactive:
+            return 0 if results else 1
+        hints = ["number = download + convert"]
+        if more:
+            hints.append("n = next page")
+        if page:
+            hints.append("p = previous page")
+        hints += ["s = new search", "q = quit"]
+        while True:
+            try:
+                raw = _input(f"\n[{'; '.join(hints)}]\n> ").strip()
+            except (Abort, KeyboardInterrupt):
+                print()
+                return 130
+            low = raw.lower()
+            if low in ("q", "quit", "exit"):
+                return 0
+            if low == "n" and more:
+                page += 1
+                break
+            if low == "p" and page:
+                page -= 1
+                break
+            if low == "s":
+                try:
+                    query = _input("Search for: ").strip()
+                except (Abort, KeyboardInterrupt):
+                    return 130
+                page = 0
+                break
+            if raw.isdigit() and 1 <= int(raw) <= len(results):
+                r = results[int(raw) - 1]
+                if get_and_build(r["source"], r["id"], args):
+                    return 0
+                continue
+            ident = fetch.identify(raw)
+            if ident and not raw.isdigit():
+                if get_and_build(ident[0], ident[1], args):
+                    return 0
+                continue
+            print("  ! not a valid choice.")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="GridlessSekai6 Custom Chart Builder (terminal edition)"
@@ -1211,12 +1544,46 @@ def main(argv: list[str] | None = None) -> int:
         metavar="KEY=VALUE",
         help="override a field, e.g. --set composer=Name --set offset_ms=300 (repeatable)",
     )
+    ap.add_argument(
+        "-s",
+        "--search",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="QUERY",
+        help="search online charts by title/artist/author (empty = newest), pick one, convert to .gs6",
+    )
+    ap.add_argument(
+        "--source",
+        default="all",
+        choices=["all", "unch", "ns", "chcy", "chcy-o", "pjsk"],
+        help="where to search / download from (default: all). unch=UntitledCharts, "
+        "ns=Next SEKAI, chcy/chcy-o=Chart Cyanvas, pjsk=official game charts",
+    )
+    ap.add_argument("--page", type=int, default=1, help="search result page (default 1)")
+    ap.add_argument(
+        "--region",
+        default="auto",
+        choices=["auto", "all", "jp", "en", "cn", "kr", "tw"],
+        help="official charts: game server region (auto detects; 'all' searches every region)",
+    )
+    ap.add_argument("--cover", type=int, default=None, metavar="N", help="official charts: vocal version number")
+    ap.add_argument("--out", default="out", metavar="DIR", help="folder for downloads and .gs6 output (default: out)")
     ap.add_argument("-y", "--yes", action="store_true", help="overwrite files without asking")
     args = ap.parse_args(argv)
 
     if args.template:
         print(json.dumps(template_cfg(), ensure_ascii=False, indent=2))
         return 0
+
+    if args.search is not None:
+        if args.zips or args.config or args.import_zip or args.zip or args.compile:
+            ap.error("--search can't be combined with other inputs")
+        try:
+            return cmd_search(args)
+        except ImportError as e:
+            print(f"fetch.py (or the 'requests' package) is unavailable: {e}", file=sys.stderr)
+            return 1
 
     if args.zips:
         if args.config or args.import_zip or args.zip or args.compile:
@@ -1225,6 +1592,22 @@ def main(argv: list[str] | None = None) -> int:
         for zp in args.zips:
             zp = clean_path(zp)
             print(f"\n##### {zp}")
+            if not os.path.isfile(zp):
+                if os.path.isdir(zp):
+                    if not build_from_folder(zp, args):
+                        failed += 1
+                    continue
+                try:
+                    import fetch
+
+                    ident = fetch.identify(zp)
+                except ImportError:
+                    ident = None
+                if ident:
+                    src = args.source if args.source != "all" else ident[0]
+                    if not get_and_build(src, ident[1], args):
+                        failed += 1
+                    continue
             try:
                 cfg = load_from_zip(zp)
             except (OSError, ValueError, zipfile.BadZipFile, json.JSONDecodeError) as e:
