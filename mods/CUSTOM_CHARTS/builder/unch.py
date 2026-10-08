@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import gzip
 import hashlib
-import io
 import json
 import os
 import re
@@ -98,6 +97,37 @@ def level_data_to_score(level: dict):
     )
 
     ents = [_Ent(r) for r in level.get("entities", [])]
+
+    # SUS has one note cell per tick/lane. UnCh can layer a tap and a
+    # trace-flick in exactly the same cell; shift only the trace-flick in
+    # the generated intermediate Score by one SUS tick. The raw source is untouched.
+    sus_tick = 1.0 / 480.0
+    cells = {}
+    for e in ents:
+        m = _SINGLE.match(e.archetype)
+        if m:
+            key = (round(float(e.num("#BEAT")), 9),
+                   round(float(e.num("lane")), 6),
+                   round(float(e.num("size", 1.0)), 6))
+            cells.setdefault(key, []).append(e)
+
+    shifted = 0
+    for key, cell in cells.items():
+        if len(cell) < 2 or not any(_SINGLE.match(e.archetype).group(3) == "TraceFlick" for e in cell):
+            continue
+        occupied = set(cells)
+        beat, lane, size = key
+        for e in cell:
+            if _SINGLE.match(e.archetype).group(3) != "TraceFlick":
+                continue
+            for sign in (1.0, -1.0, 2.0, -2.0):
+                new_key = (round(beat + sign * sus_tick, 9), lane, size)
+                if new_key not in occupied:
+                    e.d["#BEAT"] = beat + sign * sus_tick
+                    occupied.add(new_key)
+                    shifted += 1
+                    break
+
     by_name = {e.name: e for e in ents if e.name is not None}
 
     # ---- time-scale (hi-speed) groups, in file order ----------------------
@@ -312,7 +342,9 @@ def level_data_to_score(level: dict):
         waveoffset=float(level.get("bgmOffset", 0.0) or 0.0),
         requests=["ticks_per_beat 480"],
     )
-    return Score(metadata=meta, notes=notes)
+    score = Score(metadata=meta, notes=notes)
+    score._sus_workaround_shifts = shifted
+    return score
 
 
 def expected_counts(level: dict) -> tuple[int, int]:
@@ -539,7 +571,20 @@ def build_cfg(root: str, work_dir: str) -> dict:
         if a and a not in charters:
             charters.append(a)
     artists = str(first.get("artists", "") or "").strip() or "Unknown"
-    names = [str(e["meta"].get("name") or os.path.basename(e["dir"])) for e in chosen]
+    # Stable per-chart seed for the identifier. Real exports carry a unique "name";
+    # if it is missing, don't rely on the folder name alone (a zip's chart folder can be
+    # called just "chart", which would give different songs the same identifier).
+    names = [
+        str(
+            e["meta"].get("name")
+            or "{}:{}:{}".format(
+                os.path.basename(e["dir"]),
+                e["meta"].get("title", ""),
+                e["meta"].get("artists", ""),
+            )
+        )
+        for e in chosen
+    ]
     seed = names[0] if len(names) == 1 else "+".join(sorted(names))
 
     ignored = sorted(
