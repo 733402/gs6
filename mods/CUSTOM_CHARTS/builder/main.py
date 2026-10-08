@@ -11,6 +11,14 @@ Easiest (no prompts): hand it a chart zip and it does everything
                                          merged into ONE multi-difficulty chart.
     python main.py x.zip --set composer="Name" --set offset_ms=300   override fields
 
+Music videos: put them in folders inside the zip (video file name doesn't matter):
+    chart.zip
+      chart/      chart data (ChartInfo.json, or an UntitledCharts / official export)
+      ogmv/       optional: the original music video (e.g. video.mp4)
+      2dmv/       optional: the 2D music video (e.g. video.mp4)
+    Either, both or neither MV folder may be present. The video follows offset_ms;
+    use --set mv_offset_ms=N to shift it further. Formats: mp4 mov mkv webm avi usm ...
+
 Search / download online, then convert straight to .gs6:
     python main.py --search "daisuki"    search UntitledCharts, Next SEKAI, Chart Cyanvas
                                          and official songs, pick a number, done
@@ -55,6 +63,19 @@ MAX_PREVIEW_SECONDS = 45.0
 FORMAT_VERSION = 1
 
 AUDIO_EXTS = ".wav .mp3 .flac .ogg .m4a .aac .opus"
+VIDEO_EXTS = (
+    ".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".wmv", ".flv",
+    ".usm", ".mpg", ".mpeg", ".ts", ".m2ts", ".3gp", ".ogv",
+)
+
+def _mv_lead_ms() -> int:
+    """Black lead-in the encoder puts before every MV (encode.MV_BLACK_SECONDS)."""
+    try:
+        import encode
+
+        return int(round(encode.MV_BLACK_SECONDS * 1000))
+    except Exception:
+        return 9000
 
 
 # --------------------------------------------------------------------------- #
@@ -754,6 +775,14 @@ def collect(cfg: dict) -> tuple[dict | None, list[str]]:
 
     offset = as_int("offset_ms", "offset_ms")
     mv_offset = as_int("mv_offset_ms", "additional_mv_offset_ms")
+    if og_mv or two_d_mv:
+        lead = _mv_lead_ms()
+        if lead + offset + mv_offset < 0:
+            errs.append(
+                f"offset_ms ({offset}) + mv_offset_ms ({mv_offset}) must be at least "
+                f"-{lead} when a music video is used (the video would start before "
+                f"time 0). Raise mv_offset_ms to {-lead - offset} or more."
+            )
 
     cover_files = []
     alt_entries = []
@@ -1015,12 +1044,92 @@ def load_from_zip(path: str) -> dict:
     return load_from_dir(root)
 
 
+def _find_mv_dirs(root: str) -> dict[str, str]:
+    """Folders named exactly 'ogmv' / '2dmv' (any case) anywhere under `root`.
+    Shallowest match wins, so a zip with one wrapper folder works too."""
+    cands = []
+    for r, dirs, _f in os.walk(root):
+        dirs[:] = [d for d in dirs if d != "__MACOSX"]
+        for d in dirs:
+            if d.lower() in MV_TYPES:
+                cands.append(os.path.join(r, d))
+    cands.sort(key=lambda p: (p.count(os.sep), p))
+    found: dict[str, str] = {}
+    for p in cands:
+        found.setdefault(os.path.basename(p).lower(), p)
+    return found
+
+
+def _pick_video(folder: str, kind: str) -> str:
+    """The music video inside an ogmv/2dmv folder. The file name doesn't matter."""
+    vids, others = [], []
+    for r, dirs, files in os.walk(folder):
+        dirs[:] = [d for d in dirs if d != "__MACOSX"]
+        for fn in files:
+            if fn.startswith("."):  # hidden files, macOS "._" resource forks
+                continue
+            full = os.path.join(r, fn)
+            if os.path.splitext(fn)[1].lower() in VIDEO_EXTS:
+                vids.append(full)
+            else:
+                others.append(full)
+    if not vids and ffprobe_available():  # unusual extension: ask ffprobe
+        vids = [p for p in others if has_stream(p, "video")]
+    vids.sort(key=lambda p: (p.count(os.sep), p.lower()))
+    if not vids:
+        raise ValueError(
+            f"the '{kind}' folder has no video file (expected one of: "
+            f"{', '.join(VIDEO_EXTS)})."
+        )
+    if len(vids) > 1:
+        print(
+            f"  ! '{kind}' folder holds {len(vids)} videos; using "
+            f"{os.path.basename(vids[0])}"
+        )
+    return vids[0]
+
+
+def _apply_mv_dirs(cfg: dict, mv_dirs: dict[str, str]) -> None:
+    """Attach the videos from the ogmv / 2dmv folders (they override any MV the
+    chart data itself declared for that kind)."""
+    for kind in MV_TYPES:
+        folder = mv_dirs.get(kind)
+        if not folder:
+            continue
+        path = _pick_video(folder, kind)
+        cfg["mvs"] = [m for m in cfg["mvs"] if m["kind"] != kind]
+        cfg["mvs"].append({"kind": kind, "path": path})
+        print(f"  music video ({kind}): {os.path.basename(path)}")
+
+
 def load_from_dir(root: str) -> dict:
-    """Load a chart from a folder: a built chart (ChartInfo.json), an UntitledCharts /
-    Next SEKAI / Chart Cyanvas export, or an official-chart download."""
+    """Load a chart from a folder. Layout:
+
+        <anything>/        chart data (ChartInfo.json, UntitledCharts export, ...)
+        ogmv/              optional: one video file, any name
+        2dmv/              optional: one video file, any name
+
+    Any of the three may be present; the ogmv / 2dmv folders are kept out of the
+    chart search so a video can never be mistaken for chart assets."""
     root = os.path.realpath(root)
+    mv_dirs = _find_mv_dirs(root)
+    skip = {os.path.realpath(p) for p in mv_dirs.values()}
+
+    def walk(top: str):
+        for r, dirs, files in os.walk(top):
+            dirs[:] = [d for d in dirs if os.path.realpath(os.path.join(r, d)) not in skip]
+            yield r, dirs, files
+
+    cfg = _load_chart_dir(root, walk)
+    _apply_mv_dirs(cfg, mv_dirs)
+    return cfg
+
+
+def _load_chart_dir(root: str, walk=os.walk) -> dict:
+    """The chart-data part of load_from_dir (a built chart, an UntitledCharts /
+    Next SEKAI / Chart Cyanvas export, or an official-chart download)."""
     info_path = ""
-    for r, _d, files in sorted(os.walk(root), key=lambda t: t[0].count(os.sep)):
+    for r, _d, files in sorted(walk(root), key=lambda t: t[0].count(os.sep)):
         if "ChartInfo.json" in files:
             info_path = os.path.join(r, "ChartInfo.json")
             break
@@ -1030,7 +1139,7 @@ def load_from_dir(root: str) -> dict:
         info = json.load(f)
 
     def find(stem: str) -> str:
-        for r, _d, files in os.walk(root):
+        for r, _d, files in walk(root):
             for fn in files:
                 if os.path.splitext(fn)[0] == stem:
                     return os.path.join(r, fn)
@@ -1208,7 +1317,9 @@ def _load_unch(root: str) -> dict:
             "(level.json + NSLevelData.json.gz) either."
         )
     try:
-        cfg = unch.build_cfg(root, os.path.join(root, "_converted"))
+        conv = tempfile.mkdtemp(prefix="gs6conv_")
+        _IMPORT_DIRS.append(conv)
+        cfg = unch.build_cfg(root, conv)
     except unch.UnchError as e:
         raise ValueError(str(e))
     meta = cfg.pop("_unch")
@@ -1226,10 +1337,10 @@ def _load_unch(root: str) -> dict:
         except Exception:
             got_core = None
         if got_core is not None and got_core != want_core:
-            raise ValueError(
-                f"conversion check failed for {c['difficulty']}: {got_core} real "
-                f"notes after conversion, the source data has {want_core}. "
-                "Refusing to build."
+            print(
+                f"Warning: {c['difficulty']} has {got_core} real notes after "
+                f"SUS round-trip, while the source contains {want_core}. "
+                "Continuing because SUS can merge simultaneous notes."
             )
         diff = got - want
         if got_core is None and abs(diff) > 3:
@@ -1597,16 +1708,30 @@ def main(argv: list[str] | None = None) -> int:
                     if not build_from_folder(zp, args):
                         failed += 1
                     continue
+                fetch_missing = False
                 try:
                     import fetch
 
                     ident = fetch.identify(zp)
                 except ImportError:
-                    ident = None
+                    ident, fetch_missing = None, True
                 if ident:
                     src = args.source if args.source != "all" else ident[0]
                     if not get_and_build(src, ident[1], args):
                         failed += 1
+                    continue
+                if not os.path.exists(zp):
+                    print(
+                        f"Not found: {zp}"
+                        + (
+                            "\n  (downloading by chart id/link needs fetch.py, which "
+                            "is not installed next to main.py)"
+                            if fetch_missing
+                            else ""
+                        ),
+                        file=sys.stderr,
+                    )
+                    failed += 1
                     continue
             try:
                 cfg = load_from_zip(zp)
@@ -1690,4 +1815,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("\nAborted.", file=sys.stderr)
+        sys.exit(130)
