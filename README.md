@@ -31,3 +31,7 @@ ogmv
 
 and you must have a mp4 file in 2dmv/ogmv
 then zip the chart file
+
+
+report any issues to issues tab 
+request any features as well
