@@ -1,7 +1,7 @@
 # NOTE 
 this isint the offical repository this is just a fork of the custom charts mod containing some QOL stuff
 
-note this fork does NOT have mv support
+
 report any bugs in issues 
 This fork was genereated by AI
 main.py and unch.py are the only changes that have been added to this fork
